@@ -12,6 +12,10 @@ board.db
 # Container persistence directory
 data/
 
+# Dev-loop script artifacts
+tests/.uvicorn.pid
+tests/.uvicorn.log
+
 # Python
 __pycache__/
 *.pyc
