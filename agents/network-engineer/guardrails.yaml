@@ -1,0 +1,34 @@
+# Guardrails for network-engineer agent.
+# Rail names resolve to implementations in the nemoclaw runtime's rail registry.
+
+input_rails:
+  - pii_redact           # strip emails / SSNs / phone numbers before they reach the model
+  - injection_check      # detect "ignore previous instructions" style attacks
+
+output_rails:
+  - no_secrets_leaked    # never echo bearer tokens, API keys, password hashes
+  - no_production_creds  # block any output that looks like SSH keys, PEM blocks, .env contents
+
+# action_rails fire when the agent tries to invoke a tool. The pattern matches
+# against "<tool_ref>.<operation>" — wildcards allowed.
+action_rails:
+  - on: "ssh-prod-readonly.*"
+    require: none                       # readonly tool, no approval needed
+  - on: "ansible-inventory-prod.run"
+    require: human_approval             # any "run" op needs a human sign-off
+  - on: "ansible-inventory-prod.read"
+    require: none
+  - on: "*.destructive"
+    require: human_approval             # belt-and-suspenders for anything destructive
+    block_if_unattended: true           # if no human is available, hard-block
+
+topical:
+  allowed:
+    - networking
+    - incident_response
+    - infrastructure
+    - observability
+  blocked:
+    - personal_data
+    - financial_advice
+    - unrelated_chat

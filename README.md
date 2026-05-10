@@ -631,6 +631,13 @@ starforge/
 ├── data/                     # bind-mounted volume in compose deployments
 │   ├── board.db              # SQLite (auto-created)
 │   └── secret.key            # AES master key (auto-created — back this up, never commit)
+├── agents/                   # version-controlled AI-agent definitions (see agents/README.md)
+│   ├── README.md             # schema + conventions
+│   └── <agent-name>/         # one directory per agent
+│       ├── config.yaml       # metadata + structured config
+│       ├── system_prompt.md  # natural-language instructions
+│       └── guardrails.yaml   # input/output/action/topical rails
+├── tests/                    # dev-loop scripts (smoke, dev-restart, inspect-db, ...)
 └── static/
     ├── index.html            # Kanban board + project selector + team pane + FAB
     ├── setup.html            # first-run admin creation
@@ -871,3 +878,41 @@ This builds in days, not weeks; a node canvas could be added later if ever justi
 3. **Trigger model** — manual only for v1; scheduled/transition/webhook later.
 4. **Per-project vs global agents** — leaning per-project for blast-radius isolation.
 5. **Run-history retention** — how long to keep `agent_runs` rows; structured logs vs blob output.
+
+## Git-backed agent config (planned, not built)
+
+**Decision locked in:** any agent-readable content (system prompts, guardrails, tool configs, memory bindings) must be version-controlled. PR review is the right mechanism for prompt changes; `git blame` is the right way to investigate "why did the agent behave this way last Tuesday."
+
+**Forward-compatible schema:** every content field accepts one of three forms:
+
+```yaml
+# 1. INLINE — string or structure directly in the agent config
+system_prompt: "You are..."
+
+# 2. FILE — path relative to the agent's directory (works once the local-file resolver lands)
+system_prompt:
+  source: file
+  path: system_prompt.md
+
+# 3. GIT — URL + path + ref (future: when the Git resolver lands)
+system_prompt:
+  source: git
+  url: github.com/myorg/agent-prompts
+  path: network-engineer.md
+  ref: a1b2c3d                # commit SHA preferred (reproducible)
+```
+
+This way we don't need a schema migration when the Git resolver lands — Git refs just stop being inert.
+
+**Initial home for agent definitions:** [`./agents/`](agents/) in this repo, one directory per agent. Later, agents can graduate to their own repos (referenced via `source: git`) when team boundaries or release cadences require it.
+
+**Resolution model (when implemented):** snapshot-at-save, not resolve-at-invoke.
+- Save fetches the content once, persists the resolved commit SHA, stores the snapshot in the DB
+- Background job polls refs for drift, surfaces "this ref has moved" in the UI for operator opt-in
+- Agent runs use the snapshot — no live network dependency on every invocation
+- Pin to SHA by default; allow tag/branch refs with a UI warning that they will follow new commits
+
+**Auth (when implemented):** GitHub App with read-only scope on configured repos, token AES-encrypted with the existing `STARFORGE_KEY`. Deploy tokens, SSH keys, and self-hosted Git (Gitea, GitLab CE) on the list but unscheduled.
+
+See [`agents/README.md`](agents/README.md) for the concrete schema and the
+`network-engineer` example agent.

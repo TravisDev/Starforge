@@ -1,0 +1,75 @@
+# EXAMPLE — not invocable yet. Phase B/C (wizard + nemoclaw runtime) aren't built.
+# Use this as the schema reference when implementing the resolver.
+
+version: 1
+
+agent:
+  name: network-engineer
+  description: "Investigates network incidents using readonly probes and IaC introspection."
+  model: claude-opus-4-7
+
+  system_prompt:
+    source: file
+    path: system_prompt.md
+
+  execution:
+    mode: freeform
+    max_steps: 20
+    max_tokens: 200000
+    daily_budget_usd: 25
+
+  inputs:
+    - name: incident_id
+      type: string
+      required: true
+      description: "Ticket ID from the incident management system."
+    - name: target_hosts
+      type: list[hostname]
+      required: false
+      description: "If known, scope the investigation to these hosts."
+    - name: time_window
+      type: duration
+      required: false
+      default: "1h"
+      description: "How far back to look in logs / metrics."
+
+  output:
+    schema:
+      kind:
+        type: enum
+        values: [hardware_failure, config_drift, capacity, transient, unknown]
+      summary:
+        type: string
+      affected_hosts:
+        type: list[hostname]
+      recommended_actions:
+        type: list[string]
+      evidence_links:
+        type: list[url]
+
+  tools:
+    - ref: ssh-prod-readonly
+    - ref: ansible-inventory-prod
+    - ref: wireshark-parser
+      config:
+        pcap_dir: /shared/captures
+    - ref: prometheus-query
+      config:
+        endpoint: http://prom.internal:9090
+    - ref: loki-query
+      config:
+        endpoint: http://loki.internal:3100
+
+  memory:
+    - ref: network-topology-db
+      access: read
+    - ref: incident-runbook-corpus
+      access: read
+
+  access_scopes:
+    - readonly-production
+    - read-monitoring
+
+  guardrails:
+    source: file
+    path: guardrails.yaml
