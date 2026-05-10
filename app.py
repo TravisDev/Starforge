@@ -1,4 +1,4 @@
-"""Agent Board — task API + auth + OIDC SSO + admin settings."""
+"""Starforge — task API + auth + OIDC SSO + admin settings."""
 
 from __future__ import annotations
 
@@ -142,7 +142,7 @@ init_projects_schema()
 init_team_members_schema()
 init_tasks_schema()
 
-app = FastAPI(title="Agent Board", version="0.2.0")
+app = FastAPI(title="Starforge", version="0.3.0")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 

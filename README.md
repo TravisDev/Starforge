@@ -1,4 +1,4 @@
-# Agent Board
+# Starforge
 
 A slim, API-first Kanban + project + (planned) agent-management app for orchestrating an AI-agent IT/DevOps/coding/tech-writing team. Built as a lightweight alternative to Jira/OpenProject when what you actually need is a state machine of tasks (`todo` → `in_progress` → `under_review` → `done`) consumed primarily by agents over HTTP, organized by project, and managed from a thin admin GUI.
 
@@ -14,7 +14,7 @@ The fastest way — one file, one command. Persistent data lives in `./data`. Sp
 
 ```bash
 # 1. Get the source (or just the docker-compose.yml + Dockerfile if you have a prebuilt image)
-git clone <your repo> agent-board && cd agent-board
+git clone <your repo> starforge && cd starforge
 
 # 2. Bring it up — the image builds on first run
 docker compose up -d
@@ -48,23 +48,23 @@ board.example.com {
 ### Docker (without compose)
 
 ```bash
-docker build -t agent-board .
-docker run -d --name agent-board \
+docker build -t starforge .
+docker run -d --name starforge \
   -p 8000:8000 \
   -v $(pwd)/data:/data \
   --restart unless-stopped \
-  agent-board
+  starforge
 ```
 
 ### Native (development)
 
 ```powershell
-cd C:\Users\Travis\agent-board
+cd C:\Users\Travis\starforge
 pip install -r requirements.txt
 python -m uvicorn app:app --port 8000
 ```
 
-`board.db` and `secret.key` will be created next to the source files. Set `AGENT_BOARD_DATA_DIR=/some/path` to put them elsewhere.
+`board.db` and `secret.key` will be created next to the source files. Set `STARFORGE_DATA_DIR=/some/path` to put them elsewhere.
 
 ### First-run setup
 
@@ -76,8 +76,8 @@ python -m uvicorn app:app --port 8000
 
 | Variable                | Default                | Effect                                                                                  |
 |-------------------------|------------------------|-----------------------------------------------------------------------------------------|
-| `AGENT_BOARD_DATA_DIR`  | `/data` (in container) `./` (native) | Where `board.db` and `secret.key` live.                                       |
-| `AGENT_BOARD_KEY`       | _auto-generated_       | Base64-urlsafe 32-byte AES master key. If unset, generated and written to `secret.key`. |
+| `STARFORGE_DATA_DIR`  | `/data` (in container) `./` (native) | Where `board.db` and `secret.key` live.                                       |
+| `STARFORGE_KEY`       | _auto-generated_       | Base64-urlsafe 32-byte AES master key. If unset, generated and written to `secret.key`. |
 | `BEHIND_TLS`            | `0`                    | `1` when behind a TLS-terminating reverse proxy. Sets `Secure` flag on cookies.         |
 | `TZ`                    | UTC                    | Container timezone.                                                                     |
 
@@ -282,7 +282,7 @@ flowchart LR
     A5((Nemoclaw Runtime))
   end
 
-  subgraph SystemBoundary["Agent Board (system)"]
+  subgraph SystemBoundary["Starforge (system)"]
     UC1[Set up first admin]
     UC2[Sign in - local]
     UC3[Sign in - OIDC]
@@ -429,7 +429,7 @@ Reverse-proxy is expected in production (see [Security](#security--threat-model)
 ```mermaid
 flowchart LR
   Internet --> Caddy[Caddy / nginx<br/>TLS termination]
-  Caddy -- "X-Forwarded-Proto: https" --> CP[Agent Board<br/>uvicorn :8000]
+  Caddy -- "X-Forwarded-Proto: https" --> CP[Starforge<br/>uvicorn :8000]
 ```
 
 ## SysML Behavior — Activity & Sequence
@@ -454,7 +454,7 @@ flowchart TB
 ```mermaid
 sequenceDiagram
   participant U as User Browser
-  participant AB as Agent Board
+  participant AB as Starforge
   participant K as Keycloak (IdP)
 
   U->>AB: GET /auth/keycloak/start
@@ -618,7 +618,7 @@ erDiagram
 ## File layout
 
 ```
-agent-board/
+starforge/
 ├── app.py                    # FastAPI routes, project/task/team APIs, OIDC handlers
 ├── auth.py                   # password hashing, AES-256-GCM, sessions, FastAPI deps
 ├── oidc.py                   # OIDC discovery, PKCE, JWKS, ID-token verification
@@ -639,11 +639,11 @@ agent-board/
     └── settings.html         # admin: SSO providers, sessions
 ```
 
-When running natively (no container), `board.db` and `secret.key` live next to the Python source instead of in `./data/`. Set `AGENT_BOARD_DATA_DIR` to override.
+When running natively (no container), `board.db` and `secret.key` live next to the Python source instead of in `./data/`. Set `STARFORGE_DATA_DIR` to override.
 
 ## HTTP API
 
-All `/tasks*`, `/api/projects*`, and `/api/admin/*` endpoints require an authenticated session (cookie `agent_board_session`). Unauthenticated requests get **401**.
+All `/tasks*`, `/api/projects*`, and `/api/admin/*` endpoints require an authenticated session (cookie `starforge_session`). Unauthenticated requests get **401**.
 
 ### Tasks
 
@@ -718,7 +718,7 @@ Encryption is reversible by definition. A password store using AES could leak ev
 
 ### Encryption at rest (AES-256-GCM)
 - 32-byte key loaded in this order:
-  1. `AGENT_BOARD_KEY` env var (base64-urlsafe, decoded to 32 bytes), if set.
+  1. `STARFORGE_KEY` env var (base64-urlsafe, decoded to 32 bytes), if set.
   2. `secret.key` file in the project directory, if it exists.
   3. **Generated and written to `secret.key` on first run** (file mode 0600 on POSIX).
 - Used to encrypt `sso_providers.client_secret_enc`.
@@ -768,7 +768,7 @@ In Keycloak:
 4. Under **Valid redirect URIs**, add: `http://localhost:8000/auth/keycloak/callback` (or production URL).
 5. Save. Copy the client secret from the **Credentials** tab.
 
-In Agent Board (signed in as admin):
+In Starforge (signed in as admin):
 
 1. Visit `/settings` → click **+ Add provider**.
 2. Fill: slug `keycloak`, display name, issuer URL `https://your-kc-host/realms/<realm>`, client ID, client secret, scopes `openid email profile`.

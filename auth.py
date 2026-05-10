@@ -18,12 +18,12 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from fastapi import Cookie, Depends, HTTPException, Request
 
 ROOT = Path(__file__).parent
-DATA_DIR = Path(os.environ.get("AGENT_BOARD_DATA_DIR", str(ROOT)))
+DATA_DIR = Path(os.environ.get("STARFORGE_DATA_DIR", str(ROOT)))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "board.db"
 KEY_PATH = DATA_DIR / "secret.key"
 
-SESSION_COOKIE = "agent_board_session"
+SESSION_COOKIE = "starforge_session"
 SESSION_TTL = timedelta(days=30)
 BEHIND_TLS = os.environ.get("BEHIND_TLS", "0") == "1"
 
@@ -33,14 +33,14 @@ _hasher = PasswordHasher()
 # ---------- Key management ----------
 
 def _load_or_create_key() -> bytes:
-    env = os.environ.get("AGENT_BOARD_KEY")
+    env = os.environ.get("STARFORGE_KEY")
     if env:
         try:
             key = base64.urlsafe_b64decode(env + "=" * (-len(env) % 4))
         except Exception as e:
-            raise RuntimeError("AGENT_BOARD_KEY must be base64-encoded 32 bytes") from e
+            raise RuntimeError("STARFORGE_KEY must be base64-encoded 32 bytes") from e
         if len(key) != 32:
-            raise RuntimeError("AGENT_BOARD_KEY must decode to 32 bytes")
+            raise RuntimeError("STARFORGE_KEY must decode to 32 bytes")
         return key
     if KEY_PATH.exists():
         key = KEY_PATH.read_bytes()
