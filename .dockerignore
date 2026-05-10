@@ -1,0 +1,21 @@
+**/__pycache__
+**/*.pyc
+**/*.pyo
+.venv
+venv
+.env
+.git
+.gitignore
+.idea
+.vscode
+*.md
+!README.md
+
+# CRITICAL: never bake secrets/data into the image
+secret.key
+board.db
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+data/

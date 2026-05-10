@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Agent Board — Settings</title>
+<style>
+  :root {
+    --bg:#0f1115; --panel:#161922; --panel2:#1c2030; --border:#2a2f3e;
+    --text:#e6e8ee; --muted:#8a93a6; --accent:#6ea8fe; --error:#ff7171; --good:#4caf78;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;
+    background:var(--bg);color:var(--text);min-height:100vh}
+  header{padding:12px 18px;border-bottom:1px solid var(--border);display:flex;
+    align-items:center;gap:12px}
+  header h1{font-size:16px;margin:0;font-weight:600}
+  header .spacer{flex:1}
+  header a{color:var(--muted);text-decoration:none;font-size:13px;padding:6px 10px;
+    border-radius:6px;border:1px solid var(--border)}
+  header a:hover{color:var(--text);border-color:var(--accent)}
+  main{max-width:920px;margin:0 auto;padding:24px}
+  section{background:var(--panel);border:1px solid var(--border);border-radius:10px;
+    padding:18px;margin-bottom:20px}
+  section h2{font-size:14px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);
+    margin:0 0 14px;display:flex;justify-content:space-between;align-items:center}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:10px 8px;border-bottom:1px solid var(--border)}
+  th{color:var(--muted);font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:1px}
+  tr:last-child td{border-bottom:none}
+  .pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px}
+  .pill.on{background:rgba(76,175,120,0.15);color:var(--good)}
+  .pill.off{background:rgba(138,147,166,0.15);color:var(--muted)}
+  button{background:var(--panel2);color:var(--text);border:1px solid var(--border);
+    padding:6px 12px;border-radius:6px;cursor:pointer;font:inherit;font-size:12px}
+  button:hover{border-color:var(--accent)}
+  button.primary{background:var(--accent);color:#0b1020;border-color:var(--accent);font-weight:600}
+  button.danger{color:var(--error);border-color:#6a2a2a;background:transparent}
+  .form-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .form-grid .full{grid-column:1/-1}
+  label{display:block;font-size:11px;color:var(--muted);margin-bottom:4px;
+    text-transform:uppercase;letter-spacing:0.5px}
+  input,select{width:100%;background:var(--panel2);color:var(--text);
+    border:1px solid var(--border);border-radius:6px;padding:8px;font:inherit;font-size:13px}
+  input:focus{outline:none;border-color:var(--accent)}
+  .actions{margin-top:14px;display:flex;gap:8px;justify-content:flex-end}
+  .toast{position:fixed;bottom:20px;right:20px;background:var(--panel2);
+    border:1px solid var(--border);padding:10px 14px;border-radius:6px;
+    font-size:13px;display:none}
+  .toast.err{border-color:#6a2a2a;color:var(--error)}
+  .toast.ok{border-color:var(--good);color:var(--good)}
+  .mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:var(--muted)}
+  .actions-row{display:flex;gap:6px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Agent Board — Settings</h1>
+  <span class="spacer"></span>
+  <a href="/">← Board</a>
+</header>
+<main>
+  <section>
+    <h2>SSO Providers (OIDC)
+      <button class="primary" id="addBtn">+ Add provider</button>
+    </h2>
+    <div id="addForm" style="display:none;margin-bottom:16px;padding:14px;border:1px solid var(--border);border-radius:8px;background:var(--panel2)">
+      <div class="form-grid">
+        <div><label>Slug (URL-safe)</label><input id="f-slug" placeholder="keycloak" /></div>
+        <div><label>Display name</label><input id="f-name" placeholder="Keycloak" /></div>
+        <div class="full"><label>Issuer URL</label><input id="f-issuer" placeholder="https://kc.example.com/realms/myrealm" /></div>
+        <div><label>Client ID</label><input id="f-cid" /></div>
+        <div><label>Client secret</label><input id="f-csec" type="password" /></div>
+        <div class="full"><label>Scopes</label><input id="f-scopes" value="openid email profile" /></div>
+      </div>
+      <div class="actions">
+        <button id="cancelAdd">Cancel</button>
+        <button class="primary" id="saveAdd">Save provider</button>
+      </div>
+      <div class="mono" style="margin-top:8px">After saving, copy the redirect URI and register it in Keycloak.</div>
+    </div>
+    <table id="ssoTable">
+      <thead><tr><th>Name</th><th>Issuer</th><th>Client ID</th><th>Status</th><th>Redirect URI</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Active sessions
+      <button id="refreshSessions">Refresh</button>
+    </h2>
+    <table id="sessTable">
+      <thead><tr><th>User</th><th>IP</th><th>User agent</th><th>Last seen</th><th>Expires</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const toast = (msg, kind = "ok") => {
+  const t = $("toast");
+  t.className = `toast ${kind}`;
+  t.textContent = msg; t.style.display = "block";
+  setTimeout(() => t.style.display = "none", 2800);
+};
+async function api(path, opts = {}) {
+  const r = await fetch(path, { headers: {"Content-Type":"application/json"}, ...opts });
+  if (r.status === 401) { window.location.href = "/login"; return; }
+  if (r.status === 204) return null;
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || `error ${r.status}`);
+  return data;
+}
+function fmtDate(s) { try { return new Date(s).toLocaleString(); } catch { return s; } }
+function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));}
+
+async function loadSso() {
+  const list = await api("/api/admin/sso") || [];
+  const tbody = $("ssoTable").querySelector("tbody");
+  tbody.innerHTML = "";
+  for (const p of list) {
+    const tr = document.createElement("tr");
+    const redirectUri = `${location.origin}/auth/${p.slug}/callback`;
+    tr.innerHTML = `
+      <td><strong>${escapeHtml(p.display_name)}</strong><div class="mono">/${escapeHtml(p.slug)}</div></td>
+      <td class="mono">${escapeHtml(p.issuer)}</td>
+      <td class="mono">${escapeHtml(p.client_id)}</td>
+      <td><span class="pill ${p.is_enabled ? "on" : "off"}">${p.is_enabled ? "enabled" : "disabled"}</span></td>
+      <td class="mono">${escapeHtml(redirectUri)}</td>
+      <td><div class="actions-row">
+        <button data-toggle="${p.id}" data-on="${p.is_enabled}">${p.is_enabled ? "Disable" : "Enable"}</button>
+        <button class="danger" data-del="${p.id}">Delete</button>
+      </div></td>`;
+    tbody.appendChild(tr);
+  }
+  tbody.querySelectorAll("[data-toggle]").forEach(btn => btn.onclick = async () => {
+    const id = btn.dataset.toggle, on = btn.dataset.on === "true";
+    await api(`/api/admin/sso/${id}`, { method:"PATCH", body: JSON.stringify({ is_enabled: !on }) });
+    toast("Updated"); loadSso();
+  });
+  tbody.querySelectorAll("[data-del]").forEach(btn => btn.onclick = async () => {
+    if (!confirm("Delete this provider? Linked SSO logins will break.")) return;
+    await api(`/api/admin/sso/${btn.dataset.del}`, { method:"DELETE" });
+    toast("Deleted"); loadSso();
+  });
+}
+
+$("addBtn").onclick = () => $("addForm").style.display = "";
+$("cancelAdd").onclick = () => $("addForm").style.display = "none";
+$("saveAdd").onclick = async () => {
+  try {
+    await api("/api/admin/sso", { method:"POST", body: JSON.stringify({
+      slug: $("f-slug").value.trim(),
+      display_name: $("f-name").value.trim(),
+      issuer: $("f-issuer").value.trim(),
+      client_id: $("f-cid").value.trim(),
+      client_secret: $("f-csec").value,
+      scopes: $("f-scopes").value.trim() || "openid email profile",
+      is_enabled: true,
+    })});
+    ["f-slug","f-name","f-issuer","f-cid","f-csec"].forEach(id => $(id).value = "");
+    $("addForm").style.display = "none";
+    toast("Provider added — copy the redirect URI into your IdP");
+    loadSso();
+  } catch (e) { toast(e.message, "err"); }
+};
+
+async function loadSessions() {
+  const list = await api("/api/admin/sessions") || [];
+  const tbody = $("sessTable").querySelector("tbody");
+  tbody.innerHTML = "";
+  for (const s of list) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${escapeHtml(s.email)}</td>
+      <td class="mono">${escapeHtml(s.ip || "")}</td>
+      <td class="mono" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(s.user_agent || "")}</td>
+      <td>${fmtDate(s.last_seen_at)}</td>
+      <td>${fmtDate(s.expires_at)}</td>
+      <td><button class="danger" data-revoke="${s.id}">Revoke</button></td>`;
+    tbody.appendChild(tr);
+  }
+  tbody.querySelectorAll("[data-revoke]").forEach(btn => btn.onclick = async () => {
+    await api(`/api/admin/sessions/${btn.dataset.revoke}`, { method:"DELETE" });
+    toast("Session revoked"); loadSessions();
+  });
+}
+$("refreshSessions").onclick = loadSessions;
+
+loadSso();
+loadSessions();
+</script>
+</body>
+</html>

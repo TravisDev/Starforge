@@ -1,0 +1,27 @@
+services:
+  agent-board:
+    image: agent-board:latest
+    # For local development, build from the Dockerfile in this directory:
+    build: .
+    container_name: agent-board
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      # Persists board.db and secret.key. Back this directory up.
+      - ./data:/data
+    environment:
+      TZ: America/New_York
+      # Set to "1" when behind a reverse proxy that terminates TLS (Caddy, nginx, Traefik).
+      # Causes session cookies to be issued with the Secure flag.
+      # BEHIND_TLS: "1"
+      #
+      # Optional: provide the AES master key out-of-band (base64-urlsafe, 32 bytes when decoded).
+      # If unset, a key is auto-generated and persisted to /data/secret.key on first run.
+      # AGENT_BOARD_KEY: ""
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

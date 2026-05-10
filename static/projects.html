@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Agent Board — Projects</title>
+<style>
+  :root {
+    --bg:#0f1115; --panel:#161922; --panel2:#1c2030; --border:#2a2f3e;
+    --text:#e6e8ee; --muted:#8a93a6; --accent:#6ea8fe; --error:#ff7171; --good:#4caf78;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;
+    background:var(--bg);color:var(--text);min-height:100vh}
+  header{padding:12px 18px;border-bottom:1px solid var(--border);
+    display:flex;align-items:center;gap:12px}
+  header h1{font-size:16px;margin:0;font-weight:600}
+  header .spacer{flex:1}
+  header a, header button{background:var(--panel2);color:var(--text);border:1px solid var(--border);
+    padding:6px 12px;border-radius:6px;text-decoration:none;font:inherit;font-size:13px;cursor:pointer}
+  header a:hover, header button:hover{border-color:var(--accent)}
+  header button.primary{background:var(--accent);color:#0b1020;border-color:var(--accent);font-weight:600}
+  main{max-width:1100px;margin:0 auto;padding:24px}
+  section{background:var(--panel);border:1px solid var(--border);border-radius:10px;
+    padding:18px;margin-bottom:20px}
+  section h2{font-size:14px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);
+    margin:0 0 14px;display:flex;justify-content:space-between;align-items:center}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:10px 8px;border-bottom:1px solid var(--border)}
+  th{color:var(--muted);font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:1px}
+  tr:last-child td{border-bottom:none}
+  tr.archived td{opacity:0.55}
+  .swatch{display:inline-block;width:14px;height:14px;border-radius:50%;vertical-align:middle;margin-right:8px}
+  .pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px}
+  .pill.on{background:rgba(76,175,120,0.15);color:var(--good)}
+  .pill.off{background:rgba(138,147,166,0.15);color:var(--muted)}
+  .mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:var(--muted)}
+  .row-actions{display:flex;gap:6px;justify-content:flex-end}
+  .row-actions button{background:var(--panel2);color:var(--text);border:1px solid var(--border);
+    padding:5px 10px;border-radius:6px;font:inherit;font-size:12px;cursor:pointer}
+  .row-actions button:hover{border-color:var(--accent)}
+  .row-actions button.danger{color:var(--error);border-color:#6a2a2a;background:transparent}
+  label{display:block;font-size:11px;color:var(--muted);margin-bottom:4px;
+    text-transform:uppercase;letter-spacing:0.5px}
+  input,textarea{width:100%;background:var(--panel2);color:var(--text);
+    border:1px solid var(--border);border-radius:6px;padding:8px;font:inherit;font-size:13px}
+  textarea{min-height:70px;resize:vertical}
+  input:focus,textarea:focus{outline:none;border-color:var(--accent)}
+  .form-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .form-grid .full{grid-column:1/-1}
+  .colors{display:flex;gap:8px;flex-wrap:wrap}
+  .colors button{width:28px;height:28px;border-radius:50%;border:2px solid transparent;
+    cursor:pointer;padding:0}
+  .colors button.selected{border-color:var(--text)}
+  /* Modal */
+  .overlay{position:fixed;inset:0;background:rgba(0,0,0,0.55);display:none;
+    align-items:center;justify-content:center;z-index:50}
+  .overlay.open{display:flex}
+  .modal{background:var(--panel);border:1px solid var(--border);border-radius:12px;
+    width:min(560px,92vw);padding:18px;display:flex;flex-direction:column;gap:10px;
+    max-height:90vh;overflow:auto}
+  .modal h3{margin:0 0 4px;font-size:15px}
+  .modal .actions{display:flex;gap:8px;justify-content:flex-end;margin-top:6px}
+  .modal button{background:var(--panel2);color:var(--text);border:1px solid var(--border);
+    padding:8px 14px;border-radius:6px;cursor:pointer;font:inherit}
+  .modal button.primary{background:var(--accent);color:#0b1020;border-color:var(--accent);font-weight:600}
+  .modal button.danger{background:transparent;color:var(--error);border-color:#6a2a2a;margin-right:auto}
+  .toast{position:fixed;bottom:20px;right:20px;background:var(--panel2);
+    border:1px solid var(--border);padding:10px 14px;border-radius:6px;
+    font-size:13px;display:none}
+  .toast.err{border-color:#6a2a2a;color:var(--error)}
+  .toast.ok{border-color:var(--good);color:var(--good)}
+  .toggle{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted);cursor:pointer}
+</style>
+</head>
+<body>
+<header>
+  <h1>Agent Board — Projects</h1>
+  <span class="spacer"></span>
+  <label class="toggle"><input type="checkbox" id="showArchived" /> Show archived</label>
+  <button class="primary" id="newBtn">+ New project</button>
+  <a href="/">← Board</a>
+</header>
+<main>
+  <section>
+    <h2>Projects</h2>
+    <table id="tbl">
+      <thead><tr>
+        <th>Name</th><th>Slug</th><th>Tasks</th><th>Default assignee</th>
+        <th>Auto-archive</th><th>Status</th><th></th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+</main>
+
+<div class="overlay" id="ov">
+  <div class="modal">
+    <h3 id="modalTitle">New project</h3>
+    <label>Name</label>
+    <input id="f-name" />
+    <label>Slug (URL-safe; auto from name if blank)</label>
+    <input id="f-slug" placeholder="my-project" />
+    <label>Description</label>
+    <textarea id="f-desc"></textarea>
+    <div class="form-grid">
+      <div>
+        <label>Color</label>
+        <div class="colors" id="colors"></div>
+      </div>
+      <div>
+        <label>Default assignee</label>
+        <input id="f-assignee" placeholder="agent-coder-1" />
+      </div>
+    </div>
+    <div class="form-grid">
+      <div>
+        <label>Auto-archive done tasks after (days, 0=never)</label>
+        <input id="f-aad" type="number" min="0" max="3650" value="0" />
+      </div>
+      <div id="archivedField" style="display:none">
+        <label>Status</label>
+        <label class="toggle"><input type="checkbox" id="f-archived" /> Archived</label>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="danger" id="deleteBtn" style="display:none">Delete</button>
+      <button id="cancelBtn">Cancel</button>
+      <button class="primary" id="saveBtn">Save</button>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const COLORS = ["#6ea8fe","#b388ff","#4caf78","#f0b429","#ff7171","#29b6f6","#ec407a","#8a93a6"];
+let editingId = null;
+let chosenColor = COLORS[0];
+
+const toast = (msg, kind="ok") => {
+  const t = $("toast"); t.className = `toast ${kind}`; t.textContent = msg;
+  t.style.display = "block"; setTimeout(() => t.style.display = "none", 2800);
+};
+async function api(path, opts={}) {
+  const r = await fetch(path, { headers:{"Content-Type":"application/json"}, ...opts });
+  if (r.status === 401) { window.location.href = "/login"; return; }
+  if (r.status === 204) return null;
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || `error ${r.status}`);
+  return data;
+}
+const escapeHtml = (s) => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+
+function renderColors() {
+  $("colors").innerHTML = "";
+  COLORS.forEach(c => {
+    const b = document.createElement("button");
+    b.type = "button"; b.style.background = c;
+    if (c === chosenColor) b.classList.add("selected");
+    b.onclick = () => { chosenColor = c; renderColors(); };
+    $("colors").appendChild(b);
+  });
+}
+
+async function load() {
+  const includeArchived = $("showArchived").checked ? "1" : "0";
+  const list = await api(`/api/projects?include_archived=${includeArchived}`) || [];
+  const tbody = $("tbl").querySelector("tbody");
+  tbody.innerHTML = "";
+  for (const p of list) {
+    const tr = document.createElement("tr");
+    if (p.is_archived) tr.classList.add("archived");
+    tr.innerHTML = `
+      <td><span class="swatch" style="background:${p.color}"></span><strong>${escapeHtml(p.name)}</strong>
+          ${p.description ? `<div class="mono">${escapeHtml(p.description)}</div>` : ""}</td>
+      <td class="mono">${escapeHtml(p.slug)}</td>
+      <td>${p.task_count}</td>
+      <td class="mono">${escapeHtml(p.default_assignee || "—")}</td>
+      <td>${p.auto_archive_done_days > 0 ? `${p.auto_archive_done_days}d` : "—"}</td>
+      <td>${p.is_archived ? '<span class="pill off">archived</span>' : '<span class="pill on">active</span>'}</td>
+      <td><div class="row-actions">
+        <button data-edit='${p.id}'>Edit</button>
+      </div></td>`;
+    tbody.appendChild(tr);
+  }
+  tbody.querySelectorAll("[data-edit]").forEach(b => b.onclick = () => openEdit(Number(b.dataset.edit)));
+}
+
+function openNew() {
+  editingId = null;
+  $("modalTitle").textContent = "New project";
+  $("f-name").value = ""; $("f-slug").value = ""; $("f-desc").value = "";
+  $("f-assignee").value = ""; $("f-aad").value = "0";
+  $("f-archived").checked = false;
+  chosenColor = COLORS[0]; renderColors();
+  $("archivedField").style.display = "none";
+  $("deleteBtn").style.display = "none";
+  $("ov").classList.add("open"); $("f-name").focus();
+}
+
+async function openEdit(id) {
+  const p = await api(`/api/projects/${id}`);
+  if (!p) return;
+  editingId = id;
+  $("modalTitle").textContent = `Edit ${p.name}`;
+  $("f-name").value = p.name; $("f-slug").value = p.slug; $("f-desc").value = p.description;
+  $("f-assignee").value = p.default_assignee; $("f-aad").value = p.auto_archive_done_days;
+  $("f-archived").checked = !!p.is_archived;
+  chosenColor = p.color; renderColors();
+  $("archivedField").style.display = p.slug === "default" ? "none" : "";
+  $("deleteBtn").style.display = p.slug === "default" ? "none" : "";
+  $("ov").classList.add("open"); $("f-name").focus();
+}
+
+function closeModal() { $("ov").classList.remove("open"); editingId = null; }
+$("cancelBtn").onclick = closeModal;
+$("ov").onclick = (e) => { if (e.target === $("ov")) closeModal(); };
+$("newBtn").onclick = openNew;
+$("showArchived").onchange = load;
+
+$("saveBtn").onclick = async () => {
+  const payload = {
+    name: $("f-name").value.trim(),
+    slug: $("f-slug").value.trim() || undefined,
+    description: $("f-desc").value,
+    color: chosenColor,
+    default_assignee: $("f-assignee").value.trim(),
+    auto_archive_done_days: Number($("f-aad").value) || 0,
+  };
+  if (!payload.name) { $("f-name").focus(); return; }
+  try {
+    if (editingId) {
+      payload.is_archived = $("f-archived").checked;
+      await api(`/api/projects/${editingId}`, { method:"PATCH", body: JSON.stringify(payload) });
+    } else {
+      await api("/api/projects", { method:"POST", body: JSON.stringify(payload) });
+    }
+    closeModal(); toast("Saved"); load();
+  } catch (e) { toast(e.message, "err"); }
+};
+
+$("deleteBtn").onclick = async () => {
+  if (!editingId) return;
+  if (!confirm("Delete this project? Only allowed if it has no tasks.")) return;
+  try {
+    await api(`/api/projects/${editingId}`, { method:"DELETE" });
+    closeModal(); toast("Deleted"); load();
+  } catch (e) { toast(e.message, "err"); }
+};
+
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
+
+renderColors();
+load();
+</script>
+</body>
+</html>

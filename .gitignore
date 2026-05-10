@@ -1,0 +1,27 @@
+# Secrets — NEVER commit
+secret.key
+*.key
+
+# Database
+board.db
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Container persistence directory
+data/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

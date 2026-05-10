@@ -1,0 +1,924 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Agent Board</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161922;
+    --panel2: #1c2030;
+    --border: #2a2f3e;
+    --text: #e6e8ee;
+    --muted: #8a93a6;
+    --accent: #6ea8fe;
+    --todo: #8a93a6;
+    --in_progress: #f0b429;
+    --under_review: #b388ff;
+    --done: #4caf78;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+    background: var(--bg); color: var(--text); height: 100vh; display: flex; flex-direction: column;
+  }
+  header {
+    padding: 12px 18px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 12px;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: 0.3px; }
+  header .spacer { flex: 1; }
+  header input, header button, header a.btn {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    padding: 6px 10px; border-radius: 6px; font: inherit; text-decoration: none;
+  }
+  header button { cursor: pointer; }
+  header button.primary { background: var(--accent); color: #0b1020; border-color: var(--accent); font-weight: 600; }
+  header .user-pill {
+    display: flex; align-items: center; gap: 8px; padding: 4px 10px 4px 4px;
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 999px;
+    font-size: 12px; color: var(--muted);
+  }
+  header .user-pill .avatar {
+    width: 22px; height: 22px; border-radius: 50%; background: var(--accent);
+    color: #0b1020; display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 11px;
+  }
+  header a.btn:hover { border-color: var(--accent); color: var(--text); }
+
+  /* Project selector */
+  .proj-sel { position: relative; }
+  .proj-btn {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    padding: 6px 12px; border-radius: 6px; font: inherit; font-size: 13px; cursor: pointer;
+  }
+  .proj-btn:hover { border-color: var(--accent); }
+  .proj-btn .dot { width: 10px; height: 10px; border-radius: 50%; }
+  .proj-btn .caret { color: var(--muted); font-size: 10px; }
+  .proj-menu {
+    position: absolute; top: calc(100% + 4px); left: 0; min-width: 240px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4); z-index: 30; padding: 4px; display: none;
+  }
+  .proj-menu.open { display: block; }
+  .proj-item {
+    display: flex; align-items: center; gap: 8px; width: 100%;
+    background: transparent; color: var(--text); border: none; text-align: left;
+    padding: 8px 10px; border-radius: 6px; font: inherit; font-size: 13px;
+    cursor: pointer; text-decoration: none;
+  }
+  .proj-item:hover { background: var(--panel2); }
+  .proj-item.active { background: var(--panel2); }
+  .proj-item .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .proj-item .name { flex: 1; }
+  .proj-item .count { color: var(--muted); font-size: 11px; }
+  .proj-item.new { color: var(--accent); font-weight: 600; }
+  .proj-divider { height: 1px; background: var(--border); margin: 4px 0; }
+
+  /* Floating action button (speed dial) */
+  .fab-stack { position: fixed; bottom: 28px; right: 28px; z-index: 40; }
+  .fab {
+    position: relative; z-index: 2;
+    width: 56px; height: 56px; border-radius: 50%;
+    background: var(--accent); color: #0b1020; border: none;
+    cursor: pointer; font-size: 30px; font-weight: 300; line-height: 1;
+    box-shadow: 0 8px 20px rgba(0,0,0,0.45), 0 2px 4px rgba(0,0,0,0.3);
+    display: flex; align-items: center; justify-content: center;
+    transition: transform 0.25s cubic-bezier(.34,1.56,.64,1), box-shadow 0.2s ease;
+  }
+  .fab:hover { box-shadow: 0 10px 24px rgba(0,0,0,0.55), 0 2px 4px rgba(0,0,0,0.3); }
+  .fab-stack.open .fab { transform: rotate(135deg); }
+
+  .fab-item {
+    position: absolute; bottom: 8px; right: 8px;
+    height: 40px; padding: 0 18px; border-radius: 20px;
+    background: var(--panel); color: var(--text);
+    border: 1px solid var(--border); cursor: pointer;
+    display: flex; align-items: center; gap: 6px;
+    font: inherit; font-size: 13px; font-weight: 500;
+    white-space: nowrap;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    visibility: hidden;
+    opacity: 0; pointer-events: none;
+    transform: translate(0, 0) scale(0.6);
+    transform-origin: 100% 50%;
+    transition: transform 0.25s cubic-bezier(.34,1.56,.64,1),
+                opacity 0.18s ease,
+                visibility 0s linear 0.18s,
+                border-color 0.15s ease,
+                color 0.15s ease;
+  }
+  .fab-stack.open .fab-item {
+    visibility: visible;
+    opacity: 1; pointer-events: auto;
+    transform: translate(var(--x), var(--y)) scale(1);
+    transition: transform 0.25s cubic-bezier(.34,1.56,.64,1),
+                opacity 0.18s ease,
+                visibility 0s,
+                border-color 0.15s ease,
+                color 0.15s ease;
+  }
+  .fab-item:hover { border-color: var(--accent); color: var(--accent); }
+  .fab-item.disabled { color: var(--muted); cursor: not-allowed; }
+  .fab-item.disabled:hover { border-color: var(--border); color: var(--muted); }
+
+  .fab-item .badge {
+    display: inline-block;
+    background: var(--panel2); border: 1px solid var(--border);
+    color: var(--muted); font-size: 10px; font-weight: 600;
+    padding: 1px 6px; border-radius: 999px; text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  /* Stagger so they fan outward from the FAB */
+  .fab-stack.open .fab-item:nth-child(3) { transition-delay: 0s, 0s, 0s, 0s, 0s; }
+  .fab-stack.open .fab-item:nth-child(2) { transition-delay: 0.04s, 0.04s, 0s, 0s, 0s; }
+  .fab-stack.open .fab-item:nth-child(1) { transition-delay: 0.08s, 0.08s, 0s, 0s, 0s; }
+
+  /* Color swatches */
+  .colors { display: flex; gap: 8px; flex-wrap: wrap; }
+  .colors button {
+    width: 28px; height: 28px; border-radius: 50%; border: 2px solid transparent;
+    cursor: pointer; padding: 0;
+  }
+  .colors button.selected { border-color: var(--text); }
+
+  main {
+    flex: 1; display: grid; grid-template-columns: 240px 1fr;
+    gap: 12px; padding: 12px; overflow: hidden;
+  }
+  .board {
+    display: grid; grid-template-columns: repeat(4, 1fr);
+    gap: 12px; min-height: 0;
+  }
+  .team-pane {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  .team-pane h2 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: 1px;
+    margin: 0; padding: 12px 14px; color: var(--muted);
+    border-bottom: 1px solid var(--border);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .team-pane h2 button {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    padding: 3px 10px; border-radius: 6px; cursor: pointer;
+    font: inherit; font-size: 11px;
+  }
+  .team-pane h2 button:hover { border-color: var(--accent); color: var(--accent); }
+  .team-list {
+    flex: 1; overflow-y: auto; padding: 8px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .team-empty { padding: 16px; color: var(--muted); font-size: 12px; text-align: center; }
+  .member {
+    display: flex; align-items: center; gap: 10px; padding: 8px;
+    border-radius: 8px; cursor: pointer; border: 1px solid transparent;
+  }
+  .member:hover { background: var(--panel2); border-color: var(--border); }
+  .member.inactive { opacity: 0.55; }
+  .member .av {
+    width: 28px; height: 28px; border-radius: 50%; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    color: #0b1020; font-weight: 700; font-size: 12px;
+  }
+  .member .info { flex: 1; min-width: 0; }
+  .member .name {
+    font-size: 13px; font-weight: 500;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .member .role {
+    font-size: 11px; color: var(--muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .type-pill {
+    font-size: 9px; padding: 2px 7px; border-radius: 999px; flex-shrink: 0;
+    text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600;
+  }
+  .type-pill.human { background: rgba(110,168,254,0.15); color: var(--accent); }
+  .type-pill.ai_agent { background: rgba(179,136,255,0.15); color: #b388ff; }
+
+  /* Type toggle inside member modal */
+  .type-toggle { display: flex; gap: 6px; }
+  .type-toggle button {
+    flex: 1; padding: 9px; background: var(--panel2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px; cursor: pointer;
+    font: inherit; font-size: 13px;
+  }
+  .type-toggle button.active {
+    border-color: var(--accent); color: var(--accent);
+    background: rgba(110,168,254,0.08); font-weight: 600;
+  }
+  .ai-hint {
+    font-size: 11px; color: var(--muted); padding: 8px 10px;
+    background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 6px; line-height: 1.4;
+  }
+  .col {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  .col h2 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: 1px;
+    margin: 0; padding: 12px 14px; color: var(--muted);
+    border-bottom: 1px solid var(--border); display: flex; justify-content: space-between;
+  }
+  .col h2 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 8px; vertical-align: middle; }
+  .col[data-status="todo"] .dot { background: var(--todo); }
+  .col[data-status="in_progress"] .dot { background: var(--in_progress); }
+  .col[data-status="under_review"] .dot { background: var(--under_review); }
+  .col[data-status="done"] .dot { background: var(--done); }
+  .col .count { color: var(--muted); font-weight: 500; }
+
+  .cards {
+    flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .cards.drag-over { background: rgba(110, 168, 254, 0.06); }
+
+  .card {
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; cursor: grab; user-select: none;
+  }
+  .card:active { cursor: grabbing; }
+  .card.dragging { opacity: 0.4; }
+  .card .title { font-weight: 600; font-size: 14px; line-height: 1.3; }
+  .card .desc { color: var(--muted); font-size: 12px; margin-top: 4px; white-space: pre-wrap; }
+  .card .meta { display: flex; gap: 6px; margin-top: 8px; font-size: 11px; color: var(--muted); }
+  .card .pill {
+    background: rgba(255,255,255,0.05); padding: 2px 8px; border-radius: 999px;
+  }
+
+  /* Modal */
+  .overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.55); display: none;
+    align-items: center; justify-content: center; z-index: 50;
+  }
+  .overlay.open { display: flex; }
+  .modal {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    width: min(520px, 92vw); padding: 18px; display: flex; flex-direction: column; gap: 10px;
+  }
+  .modal h3 { margin: 0 0 4px; font-size: 15px; }
+  .modal label { font-size: 12px; color: var(--muted); }
+  .modal input, .modal textarea, .modal select {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    padding: 8px 10px; border-radius: 6px; font: inherit; width: 100%;
+  }
+  .modal textarea { min-height: 90px; resize: vertical; }
+  .modal .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .modal .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 6px; }
+  .modal button {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    padding: 8px 14px; border-radius: 6px; cursor: pointer; font: inherit;
+  }
+  .modal button.primary { background: var(--accent); color: #0b1020; border-color: var(--accent); font-weight: 600; }
+  .modal button.danger { background: transparent; color: #ff7171; border-color: #6a2a2a; margin-right: auto; }
+
+  ::-webkit-scrollbar { width: 8px; }
+  ::-webkit-scrollbar-thumb { background: #2a2f3e; border-radius: 4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Agent Board</h1>
+  <div class="proj-sel">
+    <button class="proj-btn" id="projBtn">
+      <span class="dot" id="projDot" style="background:#6ea8fe"></span>
+      <span id="projName">Loading…</span>
+      <span class="caret">▾</span>
+    </button>
+    <div class="proj-menu" id="projMenu">
+      <button class="proj-item new" id="newProjBtn">+ New Project</button>
+      <div class="proj-divider"></div>
+      <div id="projList"></div>
+      <div class="proj-divider"></div>
+      <a class="proj-item" href="/projects">Manage projects…</a>
+    </div>
+  </div>
+  <span class="spacer"></span>
+  <input id="filter" placeholder="filter by assignee…" />
+  <span class="user-pill" id="userPill" style="display:none">
+    <span class="avatar" id="userAvatar"></span>
+    <span id="userLabel"></span>
+  </span>
+  <a class="btn" id="settingsLink" href="/settings" style="display:none">Settings</a>
+  <button id="logoutBtn">Sign out</button>
+</header>
+
+<main>
+  <aside class="team-pane">
+    <h2><span>Team</span><button id="addMemberBtn">+ Add</button></h2>
+    <div class="team-list" id="teamList"></div>
+  </aside>
+  <section class="board" id="board">
+    <section class="col" data-status="todo">
+      <h2><span><span class="dot"></span>Todo</span><span class="count" data-count></span></h2>
+      <div class="cards" data-drop="todo"></div>
+    </section>
+    <section class="col" data-status="in_progress">
+      <h2><span><span class="dot"></span>In Progress</span><span class="count" data-count></span></h2>
+      <div class="cards" data-drop="in_progress"></div>
+    </section>
+    <section class="col" data-status="under_review">
+      <h2><span><span class="dot"></span>Under Review</span><span class="count" data-count></span></h2>
+      <div class="cards" data-drop="under_review"></div>
+    </section>
+    <section class="col" data-status="done">
+      <h2><span><span class="dot"></span>Done</span><span class="count" data-count></span></h2>
+      <div class="cards" data-drop="done"></div>
+    </section>
+  </section>
+</main>
+
+<div class="overlay" id="memOverlay">
+  <div class="modal">
+    <h3 id="memModalTitle">New team member</h3>
+    <label>Type</label>
+    <div class="type-toggle">
+      <button type="button" data-type="human">Human</button>
+      <button type="button" data-type="ai_agent">AI Agent</button>
+    </div>
+    <label>Name</label>
+    <input id="m-name" placeholder="e.g. Travis Tubbs, or coding-agent-1" />
+    <div class="row">
+      <div>
+        <label>Role</label>
+        <input id="m-role" placeholder="e.g. DevOps Engineer" />
+      </div>
+      <div>
+        <label>Email <span style="color:var(--muted);font-size:10px">(optional)</span></label>
+        <input id="m-email" />
+      </div>
+    </div>
+    <label>Description</label>
+    <textarea id="m-description" placeholder="What does this member do?"></textarea>
+    <label>Color</label>
+    <div class="colors" id="m-colors"></div>
+    <div class="ai-hint" id="m-aiHint" style="display:none">
+      AI Agent workflow, guardrails, tools, and runtime configuration will be added in Phase B.
+      For now this just registers the agent in the team roster.
+    </div>
+    <div id="m-activeRow" style="display:none;font-size:12px;color:var(--muted)">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+        <input type="checkbox" id="m-active" /> Active
+      </label>
+    </div>
+    <div class="actions">
+      <button class="danger" id="memDelete" style="display:none">Delete</button>
+      <button id="memCancel">Cancel</button>
+      <button class="primary" id="memSave">Save</button>
+    </div>
+  </div>
+</div>
+
+<div class="fab-stack" id="fabStack">
+  <button class="fab-item" id="fabProject" style="--x:0px;--y:-152px" title="New project">Project</button>
+  <button class="fab-item" id="fabAgent" style="--x:0px;--y:-104px" title="New team member">Team Member</button>
+  <button class="fab-item" id="fabTask" style="--x:0px;--y:-56px" title="New task">Task</button>
+  <button class="fab" id="fabMain" aria-label="Create">+</button>
+</div>
+
+<div class="overlay" id="projOverlay">
+  <div class="modal">
+    <h3>New project</h3>
+    <label>Name</label>
+    <input id="np-name" placeholder="e.g. IT Operations" />
+    <label>Color</label>
+    <div class="colors" id="np-colors"></div>
+    <div class="actions">
+      <button id="npCancel">Cancel</button>
+      <button class="primary" id="npSave">Create project</button>
+    </div>
+    <div style="font-size:11px;color:var(--muted)">More settings (description, default assignee, auto-archive) are available on the <a href="/projects" style="color:var(--accent)">Projects page</a>.</div>
+  </div>
+</div>
+
+<div class="overlay" id="overlay">
+  <div class="modal">
+    <h3 id="modalTitle">New Task</h3>
+    <label>Title</label>
+    <input id="f-title" />
+    <label>Description</label>
+    <textarea id="f-description"></textarea>
+    <div class="row">
+      <div>
+        <label>Project</label>
+        <select id="f-project"></select>
+      </div>
+      <div>
+        <label>Status</label>
+        <select id="f-status">
+          <option value="todo">Todo</option>
+          <option value="in_progress">In Progress</option>
+          <option value="under_review">Under Review</option>
+          <option value="done">Done</option>
+        </select>
+      </div>
+    </div>
+    <label>Assignee</label>
+    <select id="f-assignee">
+      <option value="">Unassigned</option>
+    </select>
+    <div class="actions">
+      <button class="danger" id="deleteBtn" style="display:none">Delete</button>
+      <button id="cancelBtn">Cancel</button>
+      <button class="primary" id="saveBtn">Save</button>
+    </div>
+  </div>
+</div>
+
+<script>
+async function authFetch(url, opts = {}) {
+  const r = await fetch(url, opts);
+  if (r.status === 401) { window.location.href = "/login"; throw new Error("unauthorized"); }
+  return r;
+}
+const api = {
+  list: (q="") => {
+    const params = new URLSearchParams(q);
+    if (currentProjectId) params.set("project_id", currentProjectId);
+    const qs = params.toString();
+    return authFetch("/tasks" + (qs ? "?" + qs : "")).then(r => r.json());
+  },
+  create: (t) => authFetch("/tasks", { method: "POST", headers: {"Content-Type":"application/json"},
+    body: JSON.stringify(t)}).then(r => r.json()),
+  update: (id, t) => authFetch(`/tasks/${id}`, { method: "PATCH", headers: {"Content-Type":"application/json"}, body: JSON.stringify(t)}).then(r => r.json()),
+  remove: (id) => authFetch(`/tasks/${id}`, { method: "DELETE" }),
+  me: () => authFetch("/api/me").then(r => r.json()),
+  logout: () => fetch("/api/logout", { method: "POST" }),
+  listProjects: () => authFetch("/api/projects").then(r => r.json()),
+  createProject: (p) => authFetch("/api/projects", { method: "POST",
+    headers: {"Content-Type":"application/json"}, body: JSON.stringify(p)}).then(r => r.json()),
+};
+
+const els = {
+  board: document.getElementById("board"),
+  overlay: document.getElementById("overlay"),
+  modalTitle: document.getElementById("modalTitle"),
+  fTitle: document.getElementById("f-title"),
+  fDesc: document.getElementById("f-description"),
+  fStatus: document.getElementById("f-status"),
+  fProject: document.getElementById("f-project"),
+  fAssignee: document.getElementById("f-assignee"),
+  saveBtn: document.getElementById("saveBtn"),
+  cancelBtn: document.getElementById("cancelBtn"),
+  deleteBtn: document.getElementById("deleteBtn"),
+  filter: document.getElementById("filter"),
+};
+
+els.fProject.addEventListener("change", async () => {
+  const pid = Number(els.fProject.value);
+  await loadAssigneeOptions(pid, null);
+});
+
+async function loadAssigneeOptions(projectId, selectedId) {
+  els.fAssignee.innerHTML = '<option value="">Unassigned</option>';
+  if (!projectId) return;
+  let members = [];
+  if (projectId === currentProjectId) {
+    members = team;
+  } else {
+    try {
+      const r = await fetch(`/api/projects/${projectId}/members`);
+      if (r.ok) members = await r.json();
+    } catch {}
+  }
+  members.filter(m => m.is_active).forEach(m => {
+    const opt = document.createElement("option");
+    opt.value = m.id;
+    const typeTag = m.type === "ai_agent" ? " · AI" : "";
+    opt.textContent = `${m.name}${m.role ? " — " + m.role : ""}${typeTag}`;
+    if (m.id === selectedId) opt.selected = true;
+    els.fAssignee.appendChild(opt);
+  });
+}
+
+let editingId = null;
+let filterAssignee = "";
+let projects = [];
+let currentProjectId = Number(localStorage.getItem("currentProjectId")) || null;
+const COLORS = ["#6ea8fe","#b388ff","#4caf78","#f0b429","#ff7171","#29b6f6","#ec407a","#8a93a6"];
+let chosenColor = COLORS[0];
+
+function populateProjectSelect(selectedId) {
+  els.fProject.innerHTML = "";
+  const active = projects.filter(p => !p.is_archived);
+  active.forEach(p => {
+    const opt = document.createElement("option");
+    opt.value = p.id;
+    opt.textContent = p.name;
+    if (p.id === selectedId) opt.selected = true;
+    els.fProject.appendChild(opt);
+  });
+}
+
+async function openModal(task = null) {
+  editingId = task ? task.id : null;
+  els.modalTitle.textContent = task ? `Edit Task #${task.id}` : "New Task";
+  els.fTitle.value = task?.title ?? "";
+  els.fDesc.value = task?.description ?? "";
+  els.fStatus.value = task?.status ?? "todo";
+  const projectId = task?.project_id ?? currentProjectId;
+  populateProjectSelect(projectId);
+  await loadAssigneeOptions(Number(els.fProject.value), task?.assignee_id ?? null);
+  els.deleteBtn.style.display = task ? "" : "none";
+  els.overlay.classList.add("open");
+  els.fTitle.focus();
+}
+function closeModal() { els.overlay.classList.remove("open"); editingId = null; }
+
+els.cancelBtn.onclick = closeModal;
+els.overlay.onclick = (e) => { if (e.target === els.overlay) closeModal(); };
+
+els.saveBtn.onclick = async () => {
+  const projectId = Number(els.fProject.value) || currentProjectId;
+  const assigneeId = els.fAssignee.value ? Number(els.fAssignee.value) : null;
+  const payload = {
+    title: els.fTitle.value.trim(),
+    description: els.fDesc.value,
+    status: els.fStatus.value,
+    assignee_id: assigneeId,
+    project_id: projectId,
+  };
+  if (!payload.title) { els.fTitle.focus(); return; }
+  if (editingId) {
+    await api.update(editingId, payload);
+  } else {
+    await api.create(payload);
+    if (projectId !== currentProjectId) {
+      switchProject(projectId);
+      return;
+    }
+  }
+  closeModal();
+  await loadProjects();
+  render();
+};
+
+els.deleteBtn.onclick = async () => {
+  if (!editingId) return;
+  if (!confirm("Delete this task?")) return;
+  await api.remove(editingId);
+  closeModal();
+  render();
+};
+
+els.filter.oninput = (e) => { filterAssignee = e.target.value.trim(); render(); };
+
+function cardEl(task) {
+  const el = document.createElement("div");
+  el.className = "card";
+  el.draggable = true;
+  el.dataset.id = task.id;
+  const meta = [];
+  if (task.assignee_member) {
+    const m = task.assignee_member;
+    const typeMark = m.type === "ai_agent" ? "🤖 " : "";
+    meta.push(`<span class="pill"><span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${m.color};margin-right:5px;vertical-align:middle"></span>${typeMark}${escapeHtml(m.name)}</span>`);
+  } else if (task.assignee) {
+    meta.push(`<span class="pill">@${escapeHtml(task.assignee)}</span>`);
+  }
+  meta.push(`<span class="pill">#${task.id}</span>`);
+  el.innerHTML = `
+    <div class="title">${escapeHtml(task.title)}</div>
+    ${task.description ? `<div class="desc">${escapeHtml(task.description)}</div>` : ""}
+    <div class="meta">${meta.join("")}</div>
+  `;
+  el.onclick = () => openModal(task);
+  el.addEventListener("dragstart", (e) => {
+    el.classList.add("dragging");
+    e.dataTransfer.setData("text/plain", String(task.id));
+    e.dataTransfer.effectAllowed = "move";
+  });
+  el.addEventListener("dragend", () => el.classList.remove("dragging"));
+  return el;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"
+  }[c]));
+}
+
+function wireDropZones() {
+  document.querySelectorAll("[data-drop]").forEach(zone => {
+    zone.addEventListener("dragover", (e) => { e.preventDefault(); zone.classList.add("drag-over"); });
+    zone.addEventListener("dragleave", () => zone.classList.remove("drag-over"));
+    zone.addEventListener("drop", async (e) => {
+      e.preventDefault();
+      zone.classList.remove("drag-over");
+      const id = Number(e.dataTransfer.getData("text/plain"));
+      const status = zone.dataset.drop;
+      if (id) { await api.update(id, { status }); render(); }
+    });
+  });
+}
+
+async function render() {
+  const q = filterAssignee ? `assignee=${encodeURIComponent(filterAssignee)}` : "";
+  const tasks = await api.list(q);
+  const buckets = { todo: [], in_progress: [], under_review: [], done: [] };
+  for (const t of tasks) (buckets[t.status] ?? buckets.todo).push(t);
+  for (const status of Object.keys(buckets)) {
+    const col = document.querySelector(`.col[data-status="${status}"]`);
+    const list = col.querySelector(".cards");
+    list.innerHTML = "";
+    buckets[status].forEach(t => list.appendChild(cardEl(t)));
+    col.querySelector("[data-count]").textContent = buckets[status].length;
+  }
+}
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeModal();
+  if (e.key === "n" && !els.overlay.classList.contains("open") && document.activeElement.tagName !== "INPUT") openModal();
+});
+
+async function loadMe() {
+  try {
+    const me = await api.me();
+    const label = me.display_name || me.email;
+    document.getElementById("userLabel").textContent = label;
+    document.getElementById("userAvatar").textContent = (label[0] || "?").toUpperCase();
+    document.getElementById("userPill").style.display = "";
+    if (me.is_admin) document.getElementById("settingsLink").style.display = "";
+  } catch {}
+}
+
+document.getElementById("logoutBtn").onclick = async () => {
+  await api.logout();
+  window.location.href = "/login";
+};
+
+// ---------- Project selector ----------
+function currentProject() {
+  return projects.find(p => p.id === currentProjectId);
+}
+
+async function loadProjects() {
+  projects = await api.listProjects();
+  if (!currentProjectId || !projects.find(p => p.id === currentProjectId)) {
+    currentProjectId = projects[0]?.id || null;
+  }
+  if (currentProjectId) localStorage.setItem("currentProjectId", currentProjectId);
+  renderProjectSelector();
+}
+
+function renderProjectSelector() {
+  const cur = currentProject();
+  document.getElementById("projDot").style.background = cur?.color || "#6ea8fe";
+  document.getElementById("projName").textContent = cur ? cur.name : "No project";
+  const list = document.getElementById("projList");
+  list.innerHTML = "";
+  projects.forEach(p => {
+    const b = document.createElement("button");
+    b.className = "proj-item" + (p.id === currentProjectId ? " active" : "");
+    b.innerHTML = `<span class="dot" style="background:${p.color}"></span>
+                   <span class="name">${escapeHtml(p.name)}</span>
+                   <span class="count">${p.task_count}</span>`;
+    b.onclick = () => switchProject(p.id);
+    list.appendChild(b);
+  });
+}
+
+function switchProject(id) {
+  currentProjectId = id;
+  localStorage.setItem("currentProjectId", id);
+  closeProjMenu();
+  renderProjectSelector();
+  loadTeam();
+  render();
+}
+
+function toggleProjMenu() {
+  document.getElementById("projMenu").classList.toggle("open");
+}
+function closeProjMenu() {
+  document.getElementById("projMenu").classList.remove("open");
+}
+
+document.getElementById("projBtn").onclick = (e) => { e.stopPropagation(); toggleProjMenu(); };
+document.addEventListener("click", (e) => {
+  const menu = document.getElementById("projMenu");
+  const sel = document.querySelector(".proj-sel");
+  if (menu.classList.contains("open") && !sel.contains(e.target)) closeProjMenu();
+});
+
+// ---------- New Project modal ----------
+function renderColors() {
+  const c = document.getElementById("np-colors");
+  c.innerHTML = "";
+  COLORS.forEach(col => {
+    const b = document.createElement("button");
+    b.type = "button"; b.style.background = col;
+    if (col === chosenColor) b.classList.add("selected");
+    b.onclick = () => { chosenColor = col; renderColors(); };
+    c.appendChild(b);
+  });
+}
+
+function openNewProjectModal() {
+  document.getElementById("np-name").value = "";
+  chosenColor = COLORS[0];
+  renderColors();
+  document.getElementById("projOverlay").classList.add("open");
+  document.getElementById("np-name").focus();
+}
+document.getElementById("newProjBtn").onclick = () => {
+  closeProjMenu();
+  openNewProjectModal();
+};
+document.getElementById("npCancel").onclick = () =>
+  document.getElementById("projOverlay").classList.remove("open");
+document.getElementById("projOverlay").onclick = (e) => {
+  if (e.target.id === "projOverlay") e.target.classList.remove("open");
+};
+document.getElementById("npSave").onclick = async () => {
+  const name = document.getElementById("np-name").value.trim();
+  if (!name) { document.getElementById("np-name").focus(); return; }
+  try {
+    const p = await api.createProject({ name, color: chosenColor });
+    document.getElementById("projOverlay").classList.remove("open");
+    await loadProjects();
+    switchProject(p.id);
+  } catch (e) {
+    alert(e.message || "could not create project");
+  }
+};
+
+// ---------- FAB speed dial ----------
+const fabStack = document.getElementById("fabStack");
+document.getElementById("fabMain").onclick = (e) => {
+  e.stopPropagation();
+  fabStack.classList.toggle("open");
+};
+document.addEventListener("click", (e) => {
+  if (fabStack.classList.contains("open") && !fabStack.contains(e.target)) {
+    fabStack.classList.remove("open");
+  }
+});
+document.getElementById("fabTask").onclick = () => {
+  fabStack.classList.remove("open");
+  openModal();
+};
+document.getElementById("fabProject").onclick = () => {
+  fabStack.classList.remove("open");
+  openNewProjectModal();
+};
+document.getElementById("fabAgent").onclick = () => {
+  fabStack.classList.remove("open");
+  openMemberModal();
+};
+
+// ---------- Team members ----------
+let team = [];
+let editingMemberId = null;
+let memberType = "human";
+let memberColor = COLORS[0];
+
+async function loadTeam() {
+  if (!currentProjectId) { team = []; renderTeam(); return; }
+  try {
+    team = await authFetch(`/api/projects/${currentProjectId}/members`).then(r => r.json());
+  } catch { team = []; }
+  renderTeam();
+}
+
+function renderTeam() {
+  const list = document.getElementById("teamList");
+  list.innerHTML = "";
+  if (team.length === 0) {
+    const e = document.createElement("div");
+    e.className = "team-empty";
+    e.textContent = "No team members yet. Click + Add to start.";
+    list.appendChild(e);
+    return;
+  }
+  team.forEach(m => {
+    const row = document.createElement("div");
+    row.className = "member" + (m.is_active ? "" : " inactive");
+    row.innerHTML = `
+      <div class="av" style="background:${m.color}">${(m.name[0] || "?").toUpperCase()}</div>
+      <div class="info">
+        <div class="name">${escapeHtml(m.name)}</div>
+        <div class="role">${escapeHtml(m.role || (m.type === "ai_agent" ? "AI Agent" : "Member"))}</div>
+      </div>
+      <span class="type-pill ${m.type}">${m.type === "ai_agent" ? "AI" : "Human"}</span>
+    `;
+    row.onclick = () => openMemberModal(m);
+    list.appendChild(row);
+  });
+}
+
+function setMemberType(t) {
+  memberType = t;
+  document.querySelectorAll(".type-toggle button").forEach(b =>
+    b.classList.toggle("active", b.dataset.type === t));
+  document.getElementById("m-aiHint").style.display = t === "ai_agent" ? "" : "none";
+}
+
+function renderMemberColors() {
+  const c = document.getElementById("m-colors");
+  c.innerHTML = "";
+  COLORS.forEach(col => {
+    const b = document.createElement("button");
+    b.type = "button"; b.style.background = col;
+    if (col === memberColor) b.classList.add("selected");
+    b.onclick = () => { memberColor = col; renderMemberColors(); };
+    c.appendChild(b);
+  });
+}
+
+function openMemberModal(member = null) {
+  if (!currentProjectId && !member) {
+    alert("Select or create a project first.");
+    return;
+  }
+  editingMemberId = member ? member.id : null;
+  document.getElementById("memModalTitle").textContent =
+    member ? `Edit ${member.name}` : "New team member";
+  document.getElementById("m-name").value = member?.name || "";
+  document.getElementById("m-role").value = member?.role || "";
+  document.getElementById("m-email").value = member?.email || "";
+  document.getElementById("m-description").value = member?.description || "";
+  setMemberType(member?.type || "human");
+  memberColor = member?.color || COLORS[0];
+  renderMemberColors();
+  document.getElementById("m-active").checked = member ? !!member.is_active : true;
+  document.getElementById("m-activeRow").style.display = member ? "" : "none";
+  document.getElementById("memDelete").style.display = member ? "" : "none";
+  document.getElementById("memOverlay").classList.add("open");
+  document.getElementById("m-name").focus();
+}
+
+function closeMemberModal() {
+  document.getElementById("memOverlay").classList.remove("open");
+  editingMemberId = null;
+}
+
+document.getElementById("memCancel").onclick = closeMemberModal;
+document.getElementById("memOverlay").onclick = (e) => {
+  if (e.target.id === "memOverlay") closeMemberModal();
+};
+document.querySelectorAll(".type-toggle button").forEach(b =>
+  b.onclick = () => setMemberType(b.dataset.type));
+
+document.getElementById("memSave").onclick = async () => {
+  const payload = {
+    name: document.getElementById("m-name").value.trim(),
+    type: memberType,
+    role: document.getElementById("m-role").value.trim(),
+    email: document.getElementById("m-email").value.trim(),
+    description: document.getElementById("m-description").value,
+    color: memberColor,
+  };
+  if (!payload.name) { document.getElementById("m-name").focus(); return; }
+  try {
+    if (editingMemberId) {
+      payload.is_active = document.getElementById("m-active").checked;
+      const r = await fetch(`/api/team-members/${editingMemberId}`, {
+        method: "PATCH",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify(payload),
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "save failed");
+    } else {
+      const r = await fetch(`/api/projects/${currentProjectId}/members`, {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify(payload),
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "save failed");
+    }
+    closeMemberModal();
+    await loadTeam();
+  } catch (e) { alert(e.message || "could not save member"); }
+};
+
+document.getElementById("memDelete").onclick = async () => {
+  if (!editingMemberId) return;
+  if (!confirm("Remove this team member?")) return;
+  try {
+    const r = await fetch(`/api/team-members/${editingMemberId}`, { method: "DELETE" });
+    if (!r.ok && r.status !== 204) throw new Error("delete failed");
+    closeMemberModal();
+    await loadTeam();
+  } catch (e) { alert(e.message); }
+};
+
+document.getElementById("addMemberBtn").onclick = () => openMemberModal();
+
+async function init() {
+  await loadMe();
+  await loadProjects();
+  await loadTeam();
+  render();
+}
+
+wireDropZones();
+init();
+setInterval(() => { loadProjects().then(render); }, 5000);
+</script>
+</body>
+</html>

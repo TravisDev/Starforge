@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Agent Board — Setup</title>
+<style>
+  :root {
+    --bg:#0f1115; --panel:#161922; --panel2:#1c2030; --border:#2a2f3e;
+    --text:#e6e8ee; --muted:#8a93a6; --accent:#6ea8fe; --error:#ff7171;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;
+    background:var(--bg);color:var(--text);min-height:100vh;display:flex;
+    align-items:center;justify-content:center;padding:24px}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;
+    width:min(460px,100%);padding:28px}
+  h1{font-size:20px;margin:0 0 6px}
+  p.lead{color:var(--muted);margin:0 0 20px;font-size:14px;line-height:1.5}
+  label{display:block;font-size:12px;color:var(--muted);margin:12px 0 4px}
+  input{width:100%;background:var(--panel2);color:var(--text);border:1px solid var(--border);
+    border-radius:6px;padding:10px;font:inherit}
+  input:focus{outline:none;border-color:var(--accent)}
+  .hint{font-size:11px;color:var(--muted);margin-top:4px}
+  button{width:100%;margin-top:18px;padding:11px;border-radius:6px;border:1px solid var(--accent);
+    background:var(--accent);color:#0b1020;font-weight:600;font:inherit;cursor:pointer}
+  button:disabled{opacity:0.6;cursor:not-allowed}
+  .err{color:var(--error);font-size:13px;margin-top:12px;min-height:18px}
+  .badge{display:inline-block;background:rgba(110,168,254,0.15);color:var(--accent);
+    border-radius:999px;font-size:11px;padding:3px 10px;margin-bottom:10px}
+</style>
+</head>
+<body>
+<div class="card">
+  <span class="badge">FIRST-RUN SETUP</span>
+  <h1>Welcome to Agent Board</h1>
+  <p class="lead">Create your administrator account. You can configure SSO providers and other settings later.</p>
+
+  <form id="form" autocomplete="off">
+    <label for="email">Email</label>
+    <input id="email" type="email" required autofocus />
+
+    <label for="name">Display name</label>
+    <input id="name" type="text" required minlength="1" maxlength="100" />
+
+    <label for="pw">Password</label>
+    <input id="pw" type="password" required minlength="12" />
+    <div class="hint">Minimum 12 characters. Hashed with Argon2id.</div>
+
+    <label for="pw2">Confirm password</label>
+    <input id="pw2" type="password" required minlength="12" />
+
+    <div class="err" id="err"></div>
+    <button type="submit" id="submit">Create admin account</button>
+  </form>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+$("form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  $("err").textContent = "";
+  if ($("pw").value !== $("pw2").value) { $("err").textContent = "Passwords do not match."; return; }
+  $("submit").disabled = true;
+  try {
+    const r = await fetch("/api/setup", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({
+        email: $("email").value.trim(),
+        display_name: $("name").value.trim(),
+        password: $("pw").value,
+      }),
+    });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      throw new Error(j.detail || `setup failed (${r.status})`);
+    }
+    window.location.href = "/";
+  } catch (err) {
+    $("err").textContent = err.message;
+    $("submit").disabled = false;
+  }
+});
+</script>
+</body>
+</html>
