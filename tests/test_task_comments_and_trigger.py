@@ -256,6 +256,84 @@ def test_moving_back_to_todo_triggers_run(admin_client, fake_runtime):
         app._invoke_http_override = None
 
 
+def test_user_comment_with_mention_triggers_qa_reply(admin_client, fake_runtime):
+    """User posts @mention → agent gets dispatched in comment_reply mode."""
+    import app
+    p = _new_project(admin_client, "Mention Reply Project")
+    _configure_runtime(admin_client, p["id"])
+    member = _create_ai_member(admin_client, p["id"], name="Beep Boop 42")
+    t = _new_task(admin_client, p["id"], "discuss me")
+    dispatcher = _RecordingDispatcher()
+    app._invoke_http_override = dispatcher
+    try:
+        # By slugified name
+        admin_client.post(f"/api/tasks/{t['id']}/comments",
+                          json={"body": "@beep-boop-42 can you check the BGP table?"})
+        asyncio.run(asyncio.sleep(0.1))
+        relevant = [c for c in dispatcher.calls
+                    if c["payload"]["inputs"].get("task_id") == t["id"]
+                    and c["payload"]["inputs"].get("mode") == "comment_reply"]
+        assert relevant, "expected comment_reply dispatch"
+        payload = relevant[-1]["payload"]
+        assert payload["inputs"]["triggering_comment"]["body"].startswith("@beep-boop-42")
+    finally:
+        app._invoke_http_override = None
+
+
+def test_mention_via_agent_type_slug_also_triggers(admin_client, fake_runtime):
+    import app
+    p = _new_project(admin_client, "Mention By Type Project")
+    _configure_runtime(admin_client, p["id"])
+    member = _create_ai_member(admin_client, p["id"], name="Net Eng")
+    t = _new_task(admin_client, p["id"], "talk")
+    dispatcher = _RecordingDispatcher()
+    app._invoke_http_override = dispatcher
+    try:
+        # By agent_type (network-engineer)
+        admin_client.post(f"/api/tasks/{t['id']}/comments",
+                          json={"body": "@network-engineer what subnets did you check?"})
+        asyncio.run(asyncio.sleep(0.1))
+        relevant = [c for c in dispatcher.calls
+                    if c["payload"]["inputs"].get("task_id") == t["id"]]
+        assert relevant
+    finally:
+        app._invoke_http_override = None
+
+
+def test_comment_without_mention_does_not_trigger(admin_client, fake_runtime):
+    import app
+    p = _new_project(admin_client, "No Mention Project")
+    _configure_runtime(admin_client, p["id"])
+    _create_ai_member(admin_client, p["id"])
+    t = _new_task(admin_client, p["id"], "silent comment")
+    dispatcher = _RecordingDispatcher()
+    app._invoke_http_override = dispatcher
+    try:
+        admin_client.post(f"/api/tasks/{t['id']}/comments",
+                          json={"body": "just a plain comment, nobody pinged"})
+        asyncio.run(asyncio.sleep(0.1))
+        assert dispatcher.calls == []
+    finally:
+        app._invoke_http_override = None
+
+
+def test_unknown_mention_does_not_trigger(admin_client, fake_runtime):
+    import app
+    p = _new_project(admin_client, "Unknown Mention Project")
+    _configure_runtime(admin_client, p["id"])
+    _create_ai_member(admin_client, p["id"], name="Beep")
+    t = _new_task(admin_client, p["id"], "x")
+    dispatcher = _RecordingDispatcher()
+    app._invoke_http_override = dispatcher
+    try:
+        admin_client.post(f"/api/tasks/{t['id']}/comments",
+                          json={"body": "@nobody where are you?"})
+        asyncio.run(asyncio.sleep(0.1))
+        assert dispatcher.calls == []
+    finally:
+        app._invoke_http_override = None
+
+
 def test_already_in_todo_no_trigger_on_status_no_op(admin_client, fake_runtime):
     """PATCHing status=todo when the task is already in todo shouldn't re-trigger."""
     import app

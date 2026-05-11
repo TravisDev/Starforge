@@ -361,35 +361,72 @@ async def _run_agent(
                 "tokens_in": t_in, "tokens_out": t_out,
             }
         else:
-            # Task mode: tool-using loop
-            intro_parts = [
-                f"You have been assigned task #{task_id}:",
-                f"Title: {inputs.get('task_title', '')}",
-                f"Description: {inputs.get('task_description', '')}",
-            ]
+            # Task mode: tool-using loop. Two sub-modes based on inputs.mode:
+            #   "comment_reply" → someone @-mentioned you in a comment. Answer
+            #     the latest message in a comment, then finish. DO NOT change
+            #     status — this is a discussion, not the main investigation.
+            #   default → full task investigation (in_progress → tools → comment
+            #     → under_review → finish).
+            mode = inputs.get("mode") or "investigation"
             prior = inputs.get("prior_comments") or []
-            if prior:
-                intro_parts.append("")
-                intro_parts.append(
-                    f"PRIOR COMMENT HISTORY on this task ({len(prior)} entries) — "
-                    "this is a re-try. Read carefully; incorporate the feedback "
-                    "below into your fresh investigation."
-                )
+
+            if mode == "comment_reply":
+                triggering = inputs.get("triggering_comment") or {}
+                intro_parts = [
+                    f"You have been @-mentioned in a comment on task #{task_id}.",
+                    f"Title: {inputs.get('task_title', '')}",
+                    f"Description: {inputs.get('task_description', '')}",
+                    "",
+                    f"FULL COMMENT THREAD ({len(prior)} entries, oldest first):",
+                ]
                 for c in prior:
                     kind = c.get("author_kind", "user")
                     name = c.get("author_name", "?")
                     body = (c.get("body") or "").strip()
-                    when = (c.get("created_at") or "")[:19]   # trim subseconds
+                    when = (c.get("created_at") or "")[:19]
                     intro_parts.append(f"  · [{kind}: {name} @ {when}] {body}")
                 intro_parts.append("")
                 intro_parts.append(
-                    "If a previous run's findings appear above, do NOT just repeat them. "
-                    "Look for what the human reviewer questioned, what evidence is missing, "
-                    "or what new angle to try."
+                    f"You are responding to the LATEST message from {triggering.get('author_name', '?')}: "
+                    f"{(triggering.get('body') or '').strip()}"
                 )
-            intro_parts.append("")
-            intro_parts.append("Start by setting status to in_progress.")
-            task_intro = "\n".join(intro_parts)
+                intro_parts.append("")
+                intro_parts.append(
+                    "INSTRUCTIONS for this turn (different from a full investigation):\n"
+                    "- DO NOT call set_task_status. This is a discussion, not a workflow step.\n"
+                    "- Use http_get if you need additional evidence to answer.\n"
+                    "- Respond with ONE add_comment call containing your answer, "
+                    "then call finish. Keep it conversational and concrete."
+                )
+                task_intro = "\n".join(intro_parts)
+            else:
+                intro_parts = [
+                    f"You have been assigned task #{task_id}:",
+                    f"Title: {inputs.get('task_title', '')}",
+                    f"Description: {inputs.get('task_description', '')}",
+                ]
+                if prior:
+                    intro_parts.append("")
+                    intro_parts.append(
+                        f"PRIOR COMMENT HISTORY on this task ({len(prior)} entries) — "
+                        "this is a re-try. Read carefully; incorporate the feedback "
+                        "below into your fresh investigation."
+                    )
+                    for c in prior:
+                        kind = c.get("author_kind", "user")
+                        name = c.get("author_name", "?")
+                        body = (c.get("body") or "").strip()
+                        when = (c.get("created_at") or "")[:19]
+                        intro_parts.append(f"  · [{kind}: {name} @ {when}] {body}")
+                    intro_parts.append("")
+                    intro_parts.append(
+                        "If a previous run's findings appear above, do NOT just repeat them. "
+                        "Look for what the human reviewer questioned, what evidence is missing, "
+                        "or what new angle to try."
+                    )
+                intro_parts.append("")
+                intro_parts.append("Start by setting status to in_progress.")
+                task_intro = "\n".join(intro_parts)
             messages: list[dict[str, Any]] = [
                 {"role": "system", "content": system_prompt + "\n\n" + _TOOL_INSTRUCTIONS},
                 {"role": "user", "content": task_intro},

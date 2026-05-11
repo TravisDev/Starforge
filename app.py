@@ -2213,12 +2213,109 @@ async def list_task_comments(task_id: int, _: dict = Depends(current_user)):
     return _hydrate_comments(rows)
 
 
+_MENTION_RE = re.compile(r"@([A-Za-z0-9._-]+)")
+
+
+def find_mentioned_members(project_id: int, body: str) -> list[dict[str, Any]]:
+    """Scan `body` for @tokens that match AI agent members in `project_id`.
+    A match is case-insensitive equality against either the slugified member
+    name or the member's agent_type slug."""
+    tokens = {t.lower() for t in _MENTION_RE.findall(body)}
+    if not tokens:
+        return []
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM team_members WHERE project_id = ? AND type = 'ai_agent'",
+            (project_id,),
+        ).fetchall()
+    matched: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for r in rows:
+        m = _row_to_member(r)
+        candidates = {
+            slugify(m.get("name") or ""),
+            (m.get("agent_type") or "").lower(),
+        }
+        candidates.discard("")
+        if tokens & candidates and m["id"] not in seen:
+            matched.append(m)
+            seen.add(m["id"])
+    return matched
+
+
+async def _trigger_agent_for_comment(
+    member: dict[str, Any], task: dict[str, Any], triggering_comment: dict[str, Any]
+) -> None:
+    """Q&A variant of _maybe_trigger_agent_for_task: dispatch the agent in
+    comment_reply mode with the full comment thread as context."""
+    if member.get("runtime_status") != "running" or not member.get("runtime_endpoint"):
+        log.info("mentioned agent %s isn't running — skipping reply trigger", member["id"])
+        return
+    project = get_project_row(member["project_id"])
+    if not project:
+        return
+    try:
+        rt_cfg = json.loads(project.get("runtime_config") or "{}")
+    except json.JSONDecodeError:
+        return
+    callback_url = rt_cfg.get("starforge_callback_url", "")
+    if not callback_url:
+        return
+    callback_token = ensure_project_callback_token(project["id"])
+
+    # Full comment thread including the triggering one
+    with db() as conn:
+        comment_rows = conn.execute(
+            "SELECT * FROM task_comments WHERE task_id = ? ORDER BY created_at ASC",
+            (task["id"],),
+        ).fetchall()
+    prior_comments = [
+        {
+            "author_kind": c.get("author_kind") or "user",
+            "author_name": c.get("author_name") or "—",
+            "body": c.get("body") or "",
+            "created_at": c.get("created_at") or "",
+        }
+        for c in _hydrate_comments(comment_rows)
+    ]
+
+    run_id = str(uuid.uuid4())
+    inputs = {
+        "task_id": task["id"],
+        "task_title": task.get("title", ""),
+        "task_description": task.get("description", "") or "",
+        "task_status": task.get("status", ""),
+        "mode": "comment_reply",
+        "triggering_comment": triggering_comment,
+        "prior_comments": prior_comments,
+    }
+    with db() as conn:
+        conn.execute(
+            """INSERT INTO agent_runs (id, member_id, status, inputs, triggered_by, created_at)
+               VALUES (?, ?, 'queued', ?, NULL, ?)""",
+            (run_id, member["id"], json.dumps(inputs), now_iso()),
+        )
+    asyncio.create_task(
+        _dispatch_run(
+            run_id=run_id,
+            member_endpoint=member["runtime_endpoint"],
+            callback_url=callback_url,
+            callback_token=callback_token,
+            inputs=inputs,
+            snapshot=(member.get("config") or {}).get("agent_snapshot") or {},
+        )
+    )
+    log.info("comment-triggered reply run %s for member %s on task %s",
+             run_id, member["id"], task["id"])
+
+
 @app.post("/api/tasks/{task_id}/comments", status_code=201)
 async def create_task_comment(
     task_id: int, body: CommentCreate, user: dict = Depends(current_user)
 ):
     with db() as conn:
-        if not conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone():
+        task_row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if not task_row:
             raise HTTPException(404, "task not found")
         cur = conn.execute(
             """INSERT INTO task_comments
@@ -2227,7 +2324,21 @@ async def create_task_comment(
             (task_id, user["id"], body.body, now_iso()),
         )
         row = conn.execute("SELECT * FROM task_comments WHERE id = ?", (cur.lastrowid,)).fetchone()
-    return _hydrate_comments([row])[0]
+    hydrated = _hydrate_comments([row])[0]
+
+    # @mention-driven Q&A trigger. Only fires for user-authored comments to
+    # prevent agent-to-agent feedback loops.
+    task = dict(task_row)
+    for member in find_mentioned_members(task["project_id"], body.body):
+        triggering = {
+            "author_kind": "user",
+            "author_name": hydrated.get("author_name", ""),
+            "body": body.body,
+            "created_at": hydrated.get("created_at", ""),
+        }
+        asyncio.create_task(_trigger_agent_for_comment(member, task, triggering))
+
+    return hydrated
 
 
 # ---------- Agent task actions (status + comment, authed by callback token) ----------
