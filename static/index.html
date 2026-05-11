@@ -1107,7 +1107,15 @@ async function render() {
 
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") closeModal();
-  if (e.key === "n" && !els.overlay.classList.contains("open") && document.activeElement.tagName !== "INPUT") openModal();
+  if (e.key !== "n") return;
+  // Don't fire the "n → new task" hotkey when:
+  //  - the user is typing into ANY form field (input/textarea/select or contenteditable)
+  //  - ANY modal overlay is open (task, member, project — anything)
+  const ae = document.activeElement;
+  const tag = ae ? ae.tagName : "";
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (ae && ae.isContentEditable)) return;
+  if (document.querySelector(".overlay.open")) return;
+  openModal();
 });
 
 async function loadMe() {
