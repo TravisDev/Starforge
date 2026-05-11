@@ -199,6 +199,11 @@
   }
   .type-pill.human { background: rgba(110,168,254,0.15); color: var(--accent); }
   .type-pill.ai_agent { background: rgba(179,136,255,0.15); color: #b388ff; }
+  .agent-type-tag {
+    font-size: 9px; padding: 2px 6px; border-radius: 999px; flex-shrink: 0;
+    background: var(--panel2); color: var(--muted);
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+  }
 
   /* Type toggle inside member modal */
   .type-toggle { display: flex; gap: 6px; }
@@ -339,6 +344,16 @@
     <div class="type-toggle">
       <button type="button" data-type="human">Human</button>
       <button type="button" data-type="ai_agent">AI Agent</button>
+    </div>
+    <div id="m-agentTypeRow" style="display:none">
+      <label>Agent Type</label>
+      <select id="m-agent-type">
+        <option value="">— Select agent type —</option>
+      </select>
+      <div style="font-size:11px;color:var(--muted);margin-top:4px;line-height:1.4">
+        Defined under <code style="color:var(--accent)">./agents/</code> in the repo.
+        Selecting one pre-fills name and description from <code>config.yaml</code>.
+      </div>
     </div>
     <label>Name</label>
     <input id="m-name" placeholder="e.g. Travis Tubbs, or coding-agent-1" />
@@ -773,9 +788,24 @@ document.getElementById("fabAgent").onclick = () => {
 
 // ---------- Team members ----------
 let team = [];
+let agentTypes = [];
 let editingMemberId = null;
 let memberType = "human";
 let memberColor = COLORS[0];
+
+async function loadAgentTypes() {
+  try {
+    agentTypes = await authFetch("/api/agent-types").then(r => r.json());
+  } catch { agentTypes = []; }
+  const sel = document.getElementById("m-agent-type");
+  sel.innerHTML = '<option value="">— Select agent type —</option>';
+  agentTypes.forEach(t => {
+    const opt = document.createElement("option");
+    opt.value = t.slug;
+    opt.textContent = t.name + (t.model ? `  (${t.model})` : "");
+    sel.appendChild(opt);
+  });
+}
 
 async function loadTeam() {
   if (!currentProjectId) { team = []; renderTeam(); return; }
@@ -798,13 +828,19 @@ function renderTeam() {
   team.forEach(m => {
     const row = document.createElement("div");
     row.className = "member" + (m.is_active ? "" : " inactive");
+    const typeTag = (m.type === "ai_agent" && m.agent_type)
+      ? `<span class="agent-type-tag" title="agent type from ./agents/">${escapeHtml(m.agent_type)}</span>`
+      : "";
     row.innerHTML = `
       <div class="av" style="background:${m.color}">${(m.name[0] || "?").toUpperCase()}</div>
       <div class="info">
         <div class="name">${escapeHtml(m.name)}</div>
         <div class="role">${escapeHtml(m.role || (m.type === "ai_agent" ? "AI Agent" : "Member"))}</div>
       </div>
-      <span class="type-pill ${m.type}">${m.type === "ai_agent" ? "AI" : "Human"}</span>
+      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">
+        <span class="type-pill ${m.type}">${m.type === "ai_agent" ? "AI" : "Human"}</span>
+        ${typeTag}
+      </div>
     `;
     row.onclick = () => openMemberModal(m);
     list.appendChild(row);
@@ -816,6 +852,8 @@ function setMemberType(t) {
   document.querySelectorAll(".type-toggle button").forEach(b =>
     b.classList.toggle("active", b.dataset.type === t));
   document.getElementById("m-aiHint").style.display = t === "ai_agent" ? "" : "none";
+  document.getElementById("m-agentTypeRow").style.display = t === "ai_agent" ? "" : "none";
+  if (t !== "ai_agent") document.getElementById("m-agent-type").value = "";
 }
 
 function renderMemberColors() {
@@ -843,6 +881,7 @@ function openMemberModal(member = null) {
   document.getElementById("m-email").value = member?.email || "";
   document.getElementById("m-description").value = member?.description || "";
   setMemberType(member?.type || "human");
+  document.getElementById("m-agent-type").value = member?.agent_type || "";
   memberColor = member?.color || COLORS[0];
   renderMemberColors();
   document.getElementById("m-active").checked = member ? !!member.is_active : true;
@@ -851,6 +890,19 @@ function openMemberModal(member = null) {
   document.getElementById("memOverlay").classList.add("open");
   document.getElementById("m-name").focus();
 }
+
+document.getElementById("m-agent-type").addEventListener("change", () => {
+  const slug = document.getElementById("m-agent-type").value;
+  if (!slug) return;
+  const t = agentTypes.find(x => x.slug === slug);
+  if (!t) return;
+  const nameEl = document.getElementById("m-name");
+  const roleEl = document.getElementById("m-role");
+  const descEl = document.getElementById("m-description");
+  if (!nameEl.value.trim()) nameEl.value = t.name;
+  if (!roleEl.value.trim() && t.description) roleEl.value = t.description.slice(0, 100);
+  if (!descEl.value.trim()) descEl.value = t.description;
+});
 
 function closeMemberModal() {
   document.getElementById("memOverlay").classList.remove("open");
@@ -872,6 +924,9 @@ document.getElementById("memSave").onclick = async () => {
     email: document.getElementById("m-email").value.trim(),
     description: document.getElementById("m-description").value,
     color: memberColor,
+    agent_type: memberType === "ai_agent"
+      ? (document.getElementById("m-agent-type").value || null)
+      : null,
   };
   if (!payload.name) { document.getElementById("m-name").focus(); return; }
   try {
@@ -911,6 +966,7 @@ document.getElementById("addMemberBtn").onclick = () => openMemberModal();
 
 async function init() {
   await loadMe();
+  await loadAgentTypes();
   await loadProjects();
   await loadTeam();
   render();

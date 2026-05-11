@@ -8,6 +8,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Optional
 
+import yaml
+
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -38,6 +40,7 @@ from auth import (
 
 ROOT = Path(__file__).parent
 STATIC_DIR = ROOT / "static"
+AGENTS_DIR = ROOT / "agents"
 
 VALID_STATUSES = {"todo", "in_progress", "under_review", "done"}
 
@@ -134,6 +137,9 @@ def init_team_members_schema() -> None:
                 updated_at TEXT NOT NULL
             )"""
         )
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(team_members)").fetchall()}
+        if "agent_type" not in cols:
+            conn.execute("ALTER TABLE team_members ADD COLUMN agent_type TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_team_project ON team_members(project_id)")
 
 
@@ -246,6 +252,37 @@ VALID_COLORS = {
     "#6ea8fe", "#b388ff", "#4caf78", "#f0b429",
     "#ff7171", "#29b6f6", "#ec407a", "#8a93a6",
 }
+
+
+def list_agent_types() -> list[dict[str, Any]]:
+    """Scan ./agents/ and return one entry per agent directory that has a valid config.yaml."""
+    if not AGENTS_DIR.exists():
+        return []
+    out: list[dict[str, Any]] = []
+    for d in sorted(AGENTS_DIR.iterdir()):
+        if not d.is_dir() or d.name.startswith("."):
+            continue
+        cfg = d / "config.yaml"
+        if not cfg.exists():
+            continue
+        try:
+            data = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
+        except yaml.YAMLError:
+            continue
+        agent = data.get("agent") or {}
+        if not agent.get("name"):
+            continue
+        out.append({
+            "slug": d.name,
+            "name": agent.get("name", d.name),
+            "description": agent.get("description", ""),
+            "model": agent.get("model", ""),
+        })
+    return out
+
+
+def get_agent_type_slugs() -> set[str]:
+    return {t["slug"] for t in list_agent_types()}
 
 
 # ---------- Page routes (gating) ----------
@@ -622,6 +659,7 @@ class TeamMemberCreate(BaseModel):
     role: str = Field(default="", max_length=100)
     description: str = ""
     color: str = "#6ea8fe"
+    agent_type: Optional[str] = None
 
 
 class TeamMemberUpdate(BaseModel):
@@ -632,6 +670,7 @@ class TeamMemberUpdate(BaseModel):
     description: Optional[str] = None
     color: Optional[str] = None
     is_active: Optional[bool] = None
+    agent_type: Optional[str] = None
 
 
 def _row_to_member(row) -> dict[str, Any]:
@@ -666,15 +705,20 @@ async def create_member(pid: int, body: TeamMemberCreate, user: dict = Depends(c
         raise HTTPException(400, f"invalid type; use one of {sorted(VALID_MEMBER_TYPES)}")
     if body.color not in VALID_COLORS:
         raise HTTPException(400, "invalid color")
+    if body.agent_type:
+        if body.type != "ai_agent":
+            raise HTTPException(400, "agent_type is only valid for ai_agent members")
+        if body.agent_type not in get_agent_type_slugs():
+            raise HTTPException(400, f"unknown agent_type: {body.agent_type}")
     ts = now_iso()
     with db() as conn:
         cur = conn.execute(
             """INSERT INTO team_members
                (project_id, name, type, email, role, description, color, is_active,
-                config, created_by, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 1, '{}', ?, ?, ?)""",
+                config, agent_type, created_by, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 1, '{}', ?, ?, ?, ?)""",
             (pid, body.name, body.type, body.email, body.role, body.description,
-             body.color, user["id"], ts, ts),
+             body.color, body.agent_type, user["id"], ts, ts),
         )
         row = conn.execute("SELECT * FROM team_members WHERE id = ?", (cur.lastrowid,)).fetchone()
     return _row_to_member(row)
@@ -693,6 +737,12 @@ async def update_member(mid: int, body: TeamMemberUpdate, _: dict = Depends(curr
         raise HTTPException(400, "invalid color")
     if "is_active" in data:
         data["is_active"] = 1 if data["is_active"] else 0
+    if "agent_type" in data and data["agent_type"]:
+        final_type = data.get("type", existing["type"])
+        if final_type != "ai_agent":
+            raise HTTPException(400, "agent_type is only valid for ai_agent members")
+        if data["agent_type"] not in get_agent_type_slugs():
+            raise HTTPException(400, f"unknown agent_type: {data['agent_type']}")
     fields, params = [], []
     for k, v in data.items():
         fields.append(f"{k} = ?")
@@ -706,6 +756,12 @@ async def update_member(mid: int, body: TeamMemberUpdate, _: dict = Depends(curr
         conn.execute(f"UPDATE team_members SET {', '.join(fields)} WHERE id = ?", params)
         row = conn.execute("SELECT * FROM team_members WHERE id = ?", (mid,)).fetchone()
     return _row_to_member(row)
+
+
+@app.get("/api/agent-types")
+async def api_agent_types(_: dict = Depends(current_user)):
+    """List AI agent types defined under ./agents/ in the repo."""
+    return list_agent_types()
 
 
 @app.delete("/api/team-members/{mid}", status_code=204)
