@@ -1408,7 +1408,10 @@ async function init() {
 
 wireDropZones();
 init();
-setInterval(() => { loadProjects().then(render); }, 5000);
+setInterval(() => {
+  loadProjects().then(render);
+  loadTeam();   // refresh runtime status dots + update-available pills
+}, 5000);
 </script>
 </body>
 </html>
