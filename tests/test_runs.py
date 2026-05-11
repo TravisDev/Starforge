@@ -106,6 +106,27 @@ def test_provision_passes_secrets_to_adapter(admin_client, fake_runtime):
     assert seen.get("callback_token")
 
 
+def test_provision_passes_member_identity_as_env(admin_client, fake_runtime):
+    """Member name + description should reach the container as env vars so the
+    agent can incorporate them into its system prompt as personality."""
+    p = _new_project(admin_client, "Member Identity Env")
+    _configure_runtime(admin_client, p["id"])
+    r = admin_client.post(
+        f"/api/projects/{p['id']}/members",
+        json={
+            "name": "Snarky Beep",
+            "type": "ai_agent",
+            "agent_type": "network-engineer",
+            "description": "Casual, dry sense of humor. Don't be formal.",
+        },
+    )
+    assert r.status_code == 201, r.text
+    member = r.json()
+    env = fake_runtime.containers[member["runtime_container_id"]]["extra_env_seen"]
+    assert env.get("STARFORGE_MEMBER_NAME") == "Snarky Beep"
+    assert "Casual, dry" in (env.get("STARFORGE_MEMBER_DESCRIPTION") or "")
+
+
 # ---------- run dispatch ----------
 
 class _RecordingDispatcher:

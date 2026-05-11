@@ -62,6 +62,36 @@ def _load_snapshot() -> Optional[dict[str, Any]]:
 SNAPSHOT = _load_snapshot()
 LOADED_AT = datetime.now(timezone.utc).isoformat()
 
+# Member-level identity — name + free-text description set on the team_members
+# row in Starforge. Used to give the agent a per-instance persona on top of the
+# agent-type's system prompt.
+MEMBER_NAME = os.environ.get("STARFORGE_MEMBER_NAME", "").strip()
+MEMBER_DESCRIPTION = os.environ.get("STARFORGE_MEMBER_DESCRIPTION", "").strip()
+
+
+def _build_effective_system_prompt() -> str:
+    """The agent-type's system_prompt with a personality preamble derived from
+    the member's name + description. Built once at startup since these don't
+    change for the lifetime of the container (container restart picks up edits).
+    """
+    base = ""
+    if SNAPSHOT:
+        agent_block = SNAPSHOT.get("config", {}).get("agent", {}) or {}
+        base = SNAPSHOT.get("system_prompt", "") or agent_block.get("system_prompt", "") or ""
+        if isinstance(base, dict):
+            base = json.dumps(base)
+    parts: list[str] = []
+    if MEMBER_NAME:
+        parts.append(f"Your name is {MEMBER_NAME}.")
+    if MEMBER_DESCRIPTION:
+        parts.append(f"About you: {MEMBER_DESCRIPTION}")
+    if not parts:
+        return base
+    return "\n".join(parts) + "\n\n---\n\n" + base
+
+
+EFFECTIVE_SYSTEM_PROMPT = _build_effective_system_prompt()
+
 if SNAPSHOT:
     _name = (SNAPSHOT.get("config") or {}).get("agent", {}).get("name", "unknown")
     _type = SNAPSHOT.get("agent_type", "?")
@@ -336,9 +366,10 @@ async def _run_agent(
     """Tool-using loop when invoked with a task_id, otherwise single-shot Q+A."""
     try:
         agent_block = (SNAPSHOT or {}).get("config", {}).get("agent", {}) or {}
-        system_prompt = (SNAPSHOT or {}).get("system_prompt", "") or agent_block.get("system_prompt", "") or ""
-        if isinstance(system_prompt, dict):
-            system_prompt = json.dumps(system_prompt)
+        # EFFECTIVE_SYSTEM_PROMPT was built at container startup from the
+        # snapshot's system_prompt with a personality preamble (member name +
+        # description from STARFORGE_MEMBER_* env vars) prepended.
+        system_prompt = EFFECTIVE_SYSTEM_PROMPT
         model = agent_block.get("model", "claude-sonnet-4-6")
         provider = (agent_block.get("provider") or "anthropic").lower()
         provider_endpoint = agent_block.get("provider_endpoint", "")

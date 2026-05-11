@@ -57,8 +57,9 @@ class FakeRuntime(RuntimeAdapter):
             "endpoint": f"http://fake-{project_slug}-member-{member_id}:8080",
             "started_at": datetime.now(timezone.utc).isoformat(),
             "snapshot_agent_type": snapshot.get("agent_type"),
-            # Record env vars derived from secrets so tests can assert on them
+            # Record env vars + secrets so tests can assert on them
             "secrets_seen": dict(secrets or {}),
+            "extra_env_seen": dict(config.get("extra_env") or {}),
         }
         return ProvisionResult(
             container_id=cid,

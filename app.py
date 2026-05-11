@@ -595,16 +595,24 @@ async def _provision_member(member_id: int, project_id: int) -> None:
         # Decrypt project secrets and surface to the adapter so it can pass
         # them to the container as env vars (Anthropic key, callback token).
         proj_secrets = get_project_secrets(project["id"])
-        # Auto-create the callback token if it's missing — Phase C needs it for
-        # nemoclaw → Starforge result callbacks.
         if not proj_secrets.get("callback_token"):
             ensure_project_callback_token(project["id"])
             proj_secrets = get_project_secrets(project["id"])
+
+        # Bake the member's name + description into the container as env vars
+        # so the agent's system prompt can incorporate them as personality /
+        # identity context. Changes to description require Restart to take effect.
+        rt_config_for_member = dict(rt_config)
+        rt_config_for_member["extra_env"] = {
+            **(rt_config.get("extra_env") or {}),
+            "STARFORGE_MEMBER_NAME": member["name"],
+            "STARFORGE_MEMBER_DESCRIPTION": member.get("description") or "",
+        }
         result = await rt.provision(
             member_id=member_id,
             project_slug=project["slug"],
             snapshot=snapshot,
-            config=rt_config,
+            config=rt_config_for_member,
             secrets=proj_secrets,
         )
         _set_member_runtime_state(
