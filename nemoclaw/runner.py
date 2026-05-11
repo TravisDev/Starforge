@@ -372,31 +372,40 @@ async def _run_agent(
 
             if mode == "comment_reply":
                 triggering = inputs.get("triggering_comment") or {}
+                triggering_body = (triggering.get("body") or "").strip()
+                triggering_author = triggering.get("author_name", "the user")
+                # Most-recent-last ordering: put the question last so it dominates
+                # the model's attention. Keep the thread tight; minimize ceremony.
                 intro_parts = [
-                    f"You have been @-mentioned in a comment on task #{task_id}.",
-                    f"Title: {inputs.get('task_title', '')}",
-                    f"Description: {inputs.get('task_description', '')}",
-                    "",
-                    f"FULL COMMENT THREAD ({len(prior)} entries, oldest first):",
+                    f"You are in a chat on task #{task_id} (\"{inputs.get('task_title', '')}\").",
+                    "Earlier conversation:",
                 ]
-                for c in prior:
-                    kind = c.get("author_kind", "user")
-                    name = c.get("author_name", "?")
-                    body = (c.get("body") or "").strip()
-                    when = (c.get("created_at") or "")[:19]
-                    intro_parts.append(f"  · [{kind}: {name} @ {when}] {body}")
+                if not prior:
+                    intro_parts.append("  (no prior messages)")
+                else:
+                    # Skip the last entry — that IS the triggering message, we'll spotlight it.
+                    for c in prior[:-1] if prior else []:
+                        kind = c.get("author_kind", "user")
+                        name = c.get("author_name", "?")
+                        body = (c.get("body") or "").strip()
+                        intro_parts.append(f"  [{kind}: {name}] {body}")
                 intro_parts.append("")
                 intro_parts.append(
-                    f"You are responding to the LATEST message from {triggering.get('author_name', '?')}: "
-                    f"{(triggering.get('body') or '').strip()}"
+                    f">>> {triggering_author} just said to you: {triggering_body!r}"
                 )
                 intro_parts.append("")
                 intro_parts.append(
-                    "INSTRUCTIONS for this turn (different from a full investigation):\n"
-                    "- DO NOT call set_task_status. This is a discussion, not a workflow step.\n"
-                    "- Use http_get if you need additional evidence to answer.\n"
-                    "- Respond with ONE add_comment call containing your answer, "
-                    "then call finish. Keep it conversational and concrete."
+                    "Respond to what THEY ACTUALLY SAID. Address their specific words.\n"
+                    "- If they're questioning your prior reasoning, re-examine it honestly. "
+                    "Acknowledge uncertainty if you have it.\n"
+                    "- If they're asking a meta question (\"are you reading this?\", "
+                    "\"are you sure?\"), answer it directly first, then engage with substance.\n"
+                    "- If they're suggesting something (e.g. \"could chrome be the problem?\"), "
+                    "actually evaluate that suggestion — don't just repeat what you've already said.\n"
+                    "- Use http_get only if it materially helps answer THIS specific question.\n"
+                    "- DO NOT call set_task_status. This is a chat, not a workflow step.\n"
+                    "- Keep it brief and conversational. Match their tone.\n"
+                    "- Output: one add_comment call with your reply, then finish. That's it."
                 )
                 task_intro = "\n".join(intro_parts)
             else:
