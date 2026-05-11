@@ -1105,12 +1105,43 @@ async function render() {
   }
 }
 
+// Registry of modal overlays and their close/save handlers, listed in the order
+// they'd typically be layered. topOpenModal() returns the highest one currently
+// open so Esc / Ctrl+Enter act on whatever the user most recently opened.
+const MODAL_REGISTRY = [
+  { overlayId: "overlay",
+    close: () => closeModal(),
+    save:  () => document.getElementById("saveBtn").click() },
+  { overlayId: "memOverlay",
+    close: () => closeMemberModal(),
+    save:  () => document.getElementById("memSave").click() },
+  { overlayId: "projOverlay",
+    close: () => document.getElementById("projOverlay").classList.remove("open"),
+    save:  () => document.getElementById("npSave").click() },
+];
+
+function topOpenModal() {
+  for (let i = MODAL_REGISTRY.length - 1; i >= 0; i--) {
+    const m = MODAL_REGISTRY[i];
+    const el = document.getElementById(m.overlayId);
+    if (el && el.classList.contains("open")) return m;
+  }
+  return null;
+}
+
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") closeModal();
+  // Esc → close whichever modal is open (task, member, project)
+  if (e.key === "Escape") {
+    const m = topOpenModal();
+    if (m) { e.preventDefault(); m.close(); return; }
+  }
+  // Ctrl/Cmd+Enter → save whichever modal is open
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+    const m = topOpenModal();
+    if (m) { e.preventDefault(); m.save(); return; }
+  }
+  // "n" → new task. Don't fire when typing in a form field or when a modal is open.
   if (e.key !== "n") return;
-  // Don't fire the "n → new task" hotkey when:
-  //  - the user is typing into ANY form field (input/textarea/select or contenteditable)
-  //  - ANY modal overlay is open (task, member, project — anything)
   const ae = document.activeElement;
   const tag = ae ? ae.tagName : "";
   if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (ae && ae.isContentEditable)) return;
