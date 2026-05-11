@@ -566,11 +566,6 @@
       <label>Agent log</label>
       <div class="runs-list" id="m-runsList"></div>
     </div>
-    <div id="m-activeRow" style="display:none;font-size:12px;color:var(--muted)">
-      <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
-        <input type="checkbox" id="m-active" /> Active
-      </label>
-    </div>
     <div class="actions">
       <button class="danger" id="memDelete" style="display:none">Delete</button>
       <button id="memCancel">Cancel</button>
@@ -1423,8 +1418,6 @@ function openMemberModal(member = null) {
   document.getElementById("m-typeRow").style.display = member ? "none" : "";
   memberColor = member?.color || COLORS[0];
   renderMemberColors();
-  document.getElementById("m-active").checked = member ? !!member.is_active : true;
-  document.getElementById("m-activeRow").style.display = member ? "" : "none";
   document.getElementById("memDelete").style.display = member ? "" : "none";
   // Snapshot panel + runtime actions + runs: only visible when editing an existing AI agent member
   const showSnap = !!member && member.type === "ai_agent";
@@ -1676,7 +1669,6 @@ document.getElementById("memSave").onclick = async () => {
   if (!payload.name) { document.getElementById("m-name").focus(); return; }
   try {
     if (editingMemberId) {
-      payload.is_active = document.getElementById("m-active").checked;
       const r = await fetch(`/api/team-members/${editingMemberId}`, {
         method: "PATCH",
         headers: {"Content-Type":"application/json"},
