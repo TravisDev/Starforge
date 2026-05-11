@@ -2326,16 +2326,30 @@ async def create_task_comment(
         row = conn.execute("SELECT * FROM task_comments WHERE id = ?", (cur.lastrowid,)).fetchone()
     hydrated = _hydrate_comments([row])[0]
 
-    # @mention-driven Q&A trigger. Only fires for user-authored comments to
-    # prevent agent-to-agent feedback loops.
+    # Q&A trigger. Two paths, both user-only to prevent agent-to-agent loops:
+    #   1) Explicit @mention → trigger each mentioned agent
+    #   2) No mention but the task is assigned to an AI agent → trigger the assignee
+    #      (most natural conversational UX: comment on the task and the assigned
+    #       agent picks it up without you having to remember the @ syntax)
     task = dict(task_row)
-    for member in find_mentioned_members(task["project_id"], body.body):
-        triggering = {
-            "author_kind": "user",
-            "author_name": hydrated.get("author_name", ""),
-            "body": body.body,
-            "created_at": hydrated.get("created_at", ""),
-        }
+    targets: list[dict[str, Any]] = find_mentioned_members(task["project_id"], body.body)
+    if not targets and task.get("assignee_id"):
+        with db() as conn:
+            m_row = conn.execute(
+                "SELECT * FROM team_members WHERE id = ?", (task["assignee_id"],)
+            ).fetchone()
+        if m_row:
+            m = _row_to_member(m_row)
+            if m["type"] == "ai_agent":
+                targets = [m]
+
+    triggering = {
+        "author_kind": "user",
+        "author_name": hydrated.get("author_name", ""),
+        "body": body.body,
+        "created_at": hydrated.get("created_at", ""),
+    }
+    for member in targets:
         asyncio.create_task(_trigger_agent_for_comment(member, task, triggering))
 
     return hydrated

@@ -300,17 +300,62 @@ def test_mention_via_agent_type_slug_also_triggers(admin_client, fake_runtime):
         app._invoke_http_override = None
 
 
-def test_comment_without_mention_does_not_trigger(admin_client, fake_runtime):
+def test_comment_without_mention_on_unassigned_task_does_not_trigger(admin_client, fake_runtime):
+    """Plain comments on tasks with no assignee shouldn't fire anything."""
     import app
-    p = _new_project(admin_client, "No Mention Project")
+    p = _new_project(admin_client, "No Mention Unassigned")
     _configure_runtime(admin_client, p["id"])
     _create_ai_member(admin_client, p["id"])
-    t = _new_task(admin_client, p["id"], "silent comment")
+    t = _new_task(admin_client, p["id"], "silent comment")  # no assignee_id
     dispatcher = _RecordingDispatcher()
     app._invoke_http_override = dispatcher
     try:
         admin_client.post(f"/api/tasks/{t['id']}/comments",
                           json={"body": "just a plain comment, nobody pinged"})
+        asyncio.run(asyncio.sleep(0.1))
+        assert dispatcher.calls == []
+    finally:
+        app._invoke_http_override = None
+
+
+def test_implicit_mention_when_task_assigned_to_ai(admin_client, fake_runtime):
+    """A plain comment on a task already assigned to an AI agent should
+    implicitly ping that agent — no @mention needed."""
+    import app
+    p = _new_project(admin_client, "Implicit Mention Project")
+    _configure_runtime(admin_client, p["id"])
+    member = _create_ai_member(admin_client, p["id"])
+    t = _new_task(admin_client, p["id"], "talk", assignee_id=member["id"])
+    asyncio.run(asyncio.sleep(0.1))   # let the create-time trigger settle
+    dispatcher = _RecordingDispatcher()
+    app._invoke_http_override = dispatcher
+    try:
+        admin_client.post(f"/api/tasks/{t['id']}/comments",
+                          json={"body": "are you sure about your finding?"})
+        asyncio.run(asyncio.sleep(0.1))
+        replies = [c for c in dispatcher.calls
+                   if c["payload"]["inputs"].get("mode") == "comment_reply"
+                   and c["payload"]["inputs"].get("task_id") == t["id"]]
+        assert replies, "expected an implicit comment_reply dispatch"
+        assert replies[-1]["payload"]["inputs"]["triggering_comment"]["body"] == \
+               "are you sure about your finding?"
+    finally:
+        app._invoke_http_override = None
+
+
+def test_implicit_mention_skips_human_assignee(admin_client, fake_runtime):
+    """Implicit-mention is AI-only — commenting on a human-assigned task doesn't fire."""
+    import app
+    p = _new_project(admin_client, "Implicit Mention Human")
+    hr = admin_client.post(f"/api/projects/{p['id']}/members",
+                            json={"name": "Joe", "type": "human"})
+    human_id = hr.json()["id"]
+    t = _new_task(admin_client, p["id"], "hello human", assignee_id=human_id)
+    dispatcher = _RecordingDispatcher()
+    app._invoke_http_override = dispatcher
+    try:
+        admin_client.post(f"/api/tasks/{t['id']}/comments",
+                          json={"body": "hey there"})
         asyncio.run(asyncio.sleep(0.1))
         assert dispatcher.calls == []
     finally:
