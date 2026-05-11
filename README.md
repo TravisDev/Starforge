@@ -10,7 +10,7 @@ A slim, API-first Kanban + project + (planned) agent-management app for orchestr
 
 ### Docker Compose (recommended)
 
-The fastest way — one file, one command. Persistent data lives in `./data`. Spiritual cousin to Sonarr / Radarr / Jellyseerr deployments: drop a compose file, mount a config dir, expose a port, done.
+The fastest way — one file, one command. Persistent data lives in `./data`: drop a compose file, mount a config dir, expose a port, done.
 
 ```bash
 # 1. Get the source (or just the docker-compose.yml + Dockerfile if you have a prebuilt image)
