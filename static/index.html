@@ -651,6 +651,12 @@ function populateProjectSelect(selectedId) {
   });
 }
 
+// Snapshot of the task's fields at the moment the modal opened. We use this
+// for "dirty tracking" on Save — only fields the user actually edited get
+// PATCHed, so a stale modal can't overwrite changes (e.g. status updates
+// made by an agent mid-flight) that landed since the modal opened.
+let originalTaskValues = null;
+
 async function openModal(task = null) {
   editingId = task ? task.id : null;
   els.modalTitle.textContent = task ? `Edit Task #${task.id}` : "New Task";
@@ -664,6 +670,14 @@ async function openModal(task = null) {
   // Comments only make sense on an existing task
   document.getElementById("t-commentsRow").style.display = task ? "" : "none";
   if (task) loadTaskComments(task.id);
+  // Capture initial state for dirty tracking
+  originalTaskValues = task ? {
+    title: task.title || "",
+    description: task.description || "",
+    status: task.status || "todo",
+    project_id: Number(task.project_id) || currentProjectId,
+    assignee_id: task.assignee_id ?? null,
+  } : null;
   els.overlay.classList.add("open");
   els.fTitle.focus();
 }
@@ -722,18 +736,28 @@ els.overlay.onclick = (e) => { if (e.target === els.overlay) closeModal(); };
 els.saveBtn.onclick = async () => {
   const projectId = Number(els.fProject.value) || currentProjectId;
   const assigneeId = els.fAssignee.value ? Number(els.fAssignee.value) : null;
-  const payload = {
+  const current = {
     title: els.fTitle.value.trim(),
     description: els.fDesc.value,
     status: els.fStatus.value,
     assignee_id: assigneeId,
     project_id: projectId,
   };
-  if (!payload.title) { els.fTitle.focus(); return; }
+  if (!current.title) { els.fTitle.focus(); return; }
   if (editingId) {
-    await api.update(editingId, payload);
+    // Only PATCH fields the user actually changed — protects agent updates
+    // that may have landed in the DB after this modal opened.
+    const payload = {};
+    for (const k of Object.keys(current)) {
+      if (originalTaskValues == null || current[k] !== originalTaskValues[k]) {
+        payload[k] = current[k];
+      }
+    }
+    if (Object.keys(payload).length > 0) {
+      await api.update(editingId, payload);
+    }
   } else {
-    await api.create(payload);
+    await api.create(current);
     if (projectId !== currentProjectId) {
       switchProject(projectId);
       return;
