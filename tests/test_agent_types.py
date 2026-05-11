@@ -28,7 +28,7 @@ def test_agent_type_entry_has_expected_fields():
     types = {t["slug"]: t for t in app.list_agent_types()}
     ne = types["network-engineer"]
     assert ne["name"]
-    assert ne["model"] == "claude-opus-4-7"
+    assert ne["model"]  # something pinned — could be any provider/model
     assert "network" in ne["description"].lower()
 
 

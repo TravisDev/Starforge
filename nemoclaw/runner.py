@@ -118,7 +118,10 @@ async def invoke(
     _check_callback_token(authorization)
     if SNAPSHOT is None:
         raise HTTPException(400, "no agent snapshot — container started without one")
-    if not ANTHROPIC_API_KEY:
+    # Provider-specific key validation happens inside _run_agent; we only
+    # gate here for anthropic to fail fast at request time.
+    provider = ((SNAPSHOT.get("config") or {}).get("agent", {}).get("provider") or "anthropic").lower()
+    if provider == "anthropic" and not ANTHROPIC_API_KEY:
         raise HTTPException(400, "ANTHROPIC_API_KEY not configured on this container")
 
     callback_url = body.callback_url or STARFORGE_CALLBACK_URL_FALLBACK
@@ -151,53 +154,97 @@ async def cancel_run(
 
 # ---------- Claude invocation ----------
 
+async def _call_anthropic(*, model: str, system_prompt: str, user_content: str) -> dict[str, Any]:
+    import anthropic  # type: ignore
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    resp = await asyncio.to_thread(
+        client.messages.create,
+        model=model,
+        max_tokens=4096,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_content}],
+    )
+    text = "\n".join(
+        getattr(b, "text", "") for b in resp.content if getattr(b, "type", None) == "text"
+    ).strip()
+    usage = getattr(resp, "usage", None)
+    return {
+        "output": text,
+        "tokens_in": getattr(usage, "input_tokens", None) if usage else None,
+        "tokens_out": getattr(usage, "output_tokens", None) if usage else None,
+    }
+
+
+async def _call_openai_compatible(
+    *, model: str, system_prompt: str, user_content: str,
+    base_url: Optional[str], api_key: str,
+) -> dict[str, Any]:
+    """Works for OpenAI itself and any OpenAI-compatible endpoint (Ollama, vLLM, etc.).
+
+    Ollama at http://host:11434/v1/chat/completions speaks this wire format,
+    so the same code path covers local + cloud."""
+    from openai import OpenAI  # type: ignore
+    # Ollama doesn't validate api_key but the SDK insists on one being non-empty
+    client = OpenAI(api_key=api_key or "unused", base_url=base_url) if base_url else OpenAI(api_key=api_key)
+    resp = await asyncio.to_thread(
+        client.chat.completions.create,
+        model=model,
+        max_tokens=4096,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ],
+    )
+    text = (resp.choices[0].message.content or "").strip() if resp.choices else ""
+    usage = getattr(resp, "usage", None)
+    return {
+        "output": text,
+        "tokens_in": getattr(usage, "prompt_tokens", None) if usage else None,
+        "tokens_out": getattr(usage, "completion_tokens", None) if usage else None,
+    }
+
+
 async def _run_agent(
     *, run_id: str, inputs: dict[str, Any],
     callback_url: str, callback_token: str,
 ) -> None:
-    """Background task: build messages from snapshot + inputs, call Claude,
-    POST result back to Starforge."""
+    """Background task: build messages from snapshot + inputs, call the configured
+    LLM provider, POST result back to Starforge."""
     try:
-        # Lazy import so /healthz works even if anthropic SDK fails to import
-        import anthropic  # type: ignore
-
         agent_block = (SNAPSHOT or {}).get("config", {}).get("agent", {}) or {}
         system_prompt = (SNAPSHOT or {}).get("system_prompt", "") or agent_block.get("system_prompt", "") or ""
         if isinstance(system_prompt, dict):
-            # Shouldn't happen post-resolver, but be defensive
+            # Defensive — shouldn't happen post-resolver
             system_prompt = json.dumps(system_prompt)
         model = agent_block.get("model", "claude-sonnet-4-6")
+        provider = (agent_block.get("provider") or "anthropic").lower()
+        provider_endpoint = agent_block.get("provider_endpoint", "")
 
         # For C.1 we frame the run as a single user turn containing the inputs.
-        # The system prompt instructs the agent how to handle them.
         user_content = json.dumps(inputs, indent=2)
 
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        resp = await asyncio.to_thread(
-            client.messages.create,
-            model=model,
-            max_tokens=4096,
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_content}],
-        )
+        if provider == "anthropic":
+            if not ANTHROPIC_API_KEY:
+                raise RuntimeError("ANTHROPIC_API_KEY is not set on this container")
+            llm_result = await _call_anthropic(
+                model=model, system_prompt=system_prompt, user_content=user_content,
+            )
+        elif provider in ("openai", "ollama"):
+            base_url = provider_endpoint or None
+            api_key = os.environ.get(
+                "OPENAI_API_KEY",
+                ANTHROPIC_API_KEY,  # not used by Ollama but the SDK needs something
+            )
+            llm_result = await _call_openai_compatible(
+                model=model, system_prompt=system_prompt, user_content=user_content,
+                base_url=base_url, api_key=api_key,
+            )
+        else:
+            raise RuntimeError(
+                f"unknown provider: {provider!r} (expected anthropic | openai | ollama)"
+            )
 
-        # Extract the text content from the response
-        text_parts: list[str] = []
-        for block in resp.content:
-            if getattr(block, "type", None) == "text":
-                text_parts.append(getattr(block, "text", ""))
-        output = "\n".join(text_parts).strip()
-
-        usage = getattr(resp, "usage", None)
-        tokens_in = getattr(usage, "input_tokens", None) if usage else None
-        tokens_out = getattr(usage, "output_tokens", None) if usage else None
-
-        result: dict[str, Any] = {
-            "status": "succeeded",
-            "output": output,
-            "tokens_in": tokens_in,
-            "tokens_out": tokens_out,
-        }
+        result: dict[str, Any] = {"status": "succeeded", **llm_result}
     except asyncio.CancelledError:
         result = {"status": "failed", "error": "cancelled"}
     except Exception as e:  # noqa: BLE001

@@ -46,7 +46,13 @@ version: 1
 agent:
   name: network-engineer
   description: "Short one-liner shown in the UI."
+  # LLM provider — "anthropic" (default), "openai", or "ollama".
+  provider: anthropic
+  # provider_endpoint is required for openai (when targeting a non-default URL)
+  # and ollama. Example for local Ollama: http://host.docker.internal:11434/v1
+  provider_endpoint: ""
   model: claude-opus-4-7         # pin the exact model — never just "claude-opus"
+                                  # ollama models look like llama3.1:8b, qwen2.5:14b, etc.
 
   # Content fields (system_prompt, guardrails, tool configs) accept three forms:
   #
