@@ -51,3 +51,17 @@ def admin_client(client):
     )
     assert resp.status_code == 200, resp.text
     return client
+
+
+@pytest.fixture
+def fake_runtime():
+    """Inject the FakeRuntime adapter for the duration of one test."""
+    import app
+    from runtime_fake import FakeRuntime
+    fake = FakeRuntime()
+    app._runtime_override = fake
+    try:
+        yield fake
+    finally:
+        app._runtime_override = None
+        fake.reset()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
@@ -10,6 +11,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 import yaml
+
+from runtime_adapter import RuntimeAdapter
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
@@ -412,6 +415,126 @@ def current_snapshot_hash(slug: str) -> Optional[str]:
         return resolve_agent_snapshot(slug)["content_hash"]
     except HTTPException:
         return None
+
+
+# ---------- Runtime adapter wiring ----------
+#
+# Tests inject a FakeRuntime via _runtime_override. When None, the adapter is
+# chosen at call time based on the project's runtime_config.type.
+
+_runtime_override: Optional[RuntimeAdapter] = None
+
+
+def get_runtime_for_project(rt_config: dict[str, Any]) -> Optional[RuntimeAdapter]:
+    """Return an adapter for this project's runtime config, or None if not configured."""
+    if _runtime_override is not None:
+        return _runtime_override
+    rt_type = rt_config.get("type")
+    if not rt_type or not rt_config.get("image"):
+        return None
+    if rt_type == "docker":
+        from runtime_docker import DockerRuntime
+        return DockerRuntime(rt_config)
+    raise HTTPException(501, f"runtime type '{rt_type}' not implemented")
+
+
+def _set_member_runtime_state(member_id: int, **fields) -> None:
+    """Update one or more runtime_* columns on a team member."""
+    if not fields:
+        return
+    cols = [f"{k} = ?" for k in fields]
+    cols.append("updated_at = ?")
+    params = list(fields.values()) + [now_iso(), member_id]
+    with db() as conn:
+        conn.execute(
+            f"UPDATE team_members SET {', '.join(cols)} WHERE id = ?", params
+        )
+
+
+async def _provision_member(member_id: int, project_id: int) -> None:
+    """Background task: pull image, start container, update DB with the result."""
+    try:
+        with db() as conn:
+            project_row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+            member_row = conn.execute("SELECT * FROM team_members WHERE id = ?", (member_id,)).fetchone()
+        if not project_row or not member_row:
+            return
+        project = dict(project_row)
+        member = _row_to_member(member_row)
+        try:
+            rt_config = json.loads(project.get("runtime_config") or "{}")
+        except json.JSONDecodeError:
+            rt_config = {}
+        rt = get_runtime_for_project(rt_config)
+        if rt is None:
+            # Nothing to do — runtime not configured. Leave status as-is.
+            _set_member_runtime_state(member_id, runtime_status="not_provisioned",
+                                       runtime_error=None)
+            return
+        snapshot = (member.get("config") or {}).get("agent_snapshot")
+        if not snapshot:
+            _set_member_runtime_state(
+                member_id,
+                runtime_status="error",
+                runtime_error="no agent snapshot — bind member to an agent_type first",
+            )
+            return
+        result = await rt.provision(
+            member_id=member_id,
+            project_slug=project["slug"],
+            snapshot=snapshot,
+            config=rt_config,
+        )
+        _set_member_runtime_state(
+            member_id,
+            runtime_status="running",
+            runtime_container_id=result.container_id,
+            runtime_endpoint=result.endpoint,
+            runtime_image_digest=result.image_digest,
+            runtime_started_at=now_iso(),
+            runtime_error=None,
+        )
+    except Exception as e:  # noqa: BLE001 — last-resort surface to DB
+        _set_member_runtime_state(member_id, runtime_status="error", runtime_error=str(e))
+
+
+async def _trigger_provision(member_id: int, project_id: int) -> None:
+    """Set status=starting and run provision. Sync when FakeRuntime overrides;
+    fire-and-forget on real Docker (which can take many seconds to pull)."""
+    _set_member_runtime_state(member_id, runtime_status="starting", runtime_error=None)
+    if _runtime_override is not None:
+        # Tests get deterministic synchronous behavior.
+        await _provision_member(member_id, project_id)
+    else:
+        asyncio.create_task(_provision_member(member_id, project_id))
+
+
+async def _teardown_member_runtime(member: dict[str, Any], remove: bool = True) -> None:
+    """Stop (and optionally remove) the member's container. Safe if not provisioned."""
+    cid = member.get("runtime_container_id")
+    if not cid:
+        return
+    project = get_project_row(member["project_id"])
+    if not project:
+        return
+    try:
+        rt_config = json.loads(project.get("runtime_config") or "{}")
+    except json.JSONDecodeError:
+        rt_config = {}
+    try:
+        rt = get_runtime_for_project(rt_config)
+    except HTTPException:
+        rt = None
+    if rt is None:
+        return
+    try:
+        if remove:
+            await rt.remove(cid)
+        else:
+            await rt.stop(cid)
+    except Exception as e:  # noqa: BLE001
+        # Don't block the user-facing operation on cleanup errors.
+        _set_member_runtime_state(member["id"], runtime_error=f"teardown: {e}")
 
 
 # ---------- Page routes (gating) ----------
@@ -917,7 +1040,20 @@ async def create_member(pid: int, body: TeamMemberCreate, user: dict = Depends(c
             (pid, body.name, body.type, body.email, body.role, body.description,
              body.color, json.dumps(config_blob), body.agent_type, user["id"], ts, ts),
         )
-        row = conn.execute("SELECT * FROM team_members WHERE id = ?", (cur.lastrowid,)).fetchone()
+        new_id = cur.lastrowid
+
+    # Auto-provision the runtime container if this is an AI agent member
+    # bound to an agent_type AND the project has a runtime configured.
+    if body.type == "ai_agent" and body.agent_type:
+        try:
+            rt_cfg = json.loads(project.get("runtime_config") or "{}")
+        except json.JSONDecodeError:
+            rt_cfg = {}
+        if rt_cfg.get("type") and rt_cfg.get("image"):
+            await _trigger_provision(new_id, pid)
+
+    with db() as conn:
+        row = conn.execute("SELECT * FROM team_members WHERE id = ?", (new_id,)).fetchone()
     return _row_to_member(row)
 
 
@@ -1026,9 +1162,138 @@ async def refresh_member_agent_snapshot(mid: int, _: dict = Depends(current_user
 @app.delete("/api/team-members/{mid}", status_code=204)
 async def delete_member(mid: int, _: dict = Depends(current_user)):
     with db() as conn:
-        cur = conn.execute("DELETE FROM team_members WHERE id = ?", (mid,))
-        if cur.rowcount == 0:
-            raise HTTPException(404, "team member not found")
+        row = conn.execute("SELECT * FROM team_members WHERE id = ?", (mid,)).fetchone()
+    if not row:
+        raise HTTPException(404, "team member not found")
+    member = _row_to_member(row)
+    # Tear down the container before deleting the DB row so we don't orphan it.
+    if member.get("runtime_container_id"):
+        await _teardown_member_runtime(member, remove=True)
+    with db() as conn:
+        conn.execute("DELETE FROM team_members WHERE id = ?", (mid,))
+
+
+# ---------- Runtime control endpoints ----------
+
+@app.post("/api/team-members/{mid}/runtime/start")
+async def member_runtime_start(mid: int, _: dict = Depends(current_user)):
+    with db() as conn:
+        row = conn.execute("SELECT * FROM team_members WHERE id = ?", (mid,)).fetchone()
+    if not row:
+        raise HTTPException(404, "team member not found")
+    member = _row_to_member(row)
+    if member["type"] != "ai_agent":
+        raise HTTPException(400, "only ai_agent members have runtime containers")
+    if not member.get("agent_type"):
+        raise HTTPException(400, "bind the member to an agent_type first")
+
+    cid = member.get("runtime_container_id")
+    if cid:
+        # Container exists — just start it
+        project = get_project_row(member["project_id"]) or {}
+        try:
+            rt_cfg = json.loads(project.get("runtime_config") or "{}")
+        except json.JSONDecodeError:
+            rt_cfg = {}
+        rt = get_runtime_for_project(rt_cfg)
+        if rt is None:
+            raise HTTPException(400, "no runtime configured for this project")
+        await rt.start(cid)
+        _set_member_runtime_state(mid, runtime_status="running", runtime_error=None)
+    else:
+        # Fresh provision
+        await _trigger_provision(mid, member["project_id"])
+    with db() as conn:
+        row = conn.execute("SELECT * FROM team_members WHERE id = ?", (mid,)).fetchone()
+    return _row_to_member(row)
+
+
+@app.post("/api/team-members/{mid}/runtime/stop")
+async def member_runtime_stop(mid: int, _: dict = Depends(current_user)):
+    with db() as conn:
+        row = conn.execute("SELECT * FROM team_members WHERE id = ?", (mid,)).fetchone()
+    if not row:
+        raise HTTPException(404, "team member not found")
+    member = _row_to_member(row)
+    if not member.get("runtime_container_id"):
+        raise HTTPException(400, "no runtime container to stop")
+    await _teardown_member_runtime(member, remove=False)
+    _set_member_runtime_state(mid, runtime_status="stopped")
+    with db() as conn:
+        row = conn.execute("SELECT * FROM team_members WHERE id = ?", (mid,)).fetchone()
+    return _row_to_member(row)
+
+
+@app.post("/api/team-members/{mid}/runtime/restart")
+async def member_runtime_restart(
+    mid: int,
+    pull: bool = False,
+    _: dict = Depends(current_user),
+):
+    """Remove the existing container and re-provision. With pull=true, the
+    image is pulled fresh — this is the "Update" path."""
+    with db() as conn:
+        row = conn.execute("SELECT * FROM team_members WHERE id = ?", (mid,)).fetchone()
+    if not row:
+        raise HTTPException(404, "team member not found")
+    member = _row_to_member(row)
+    if member["type"] != "ai_agent":
+        raise HTTPException(400, "only ai_agent members have runtime containers")
+    # Tear down existing
+    if member.get("runtime_container_id"):
+        await _teardown_member_runtime(member, remove=True)
+        _set_member_runtime_state(
+            mid,
+            runtime_container_id=None,
+            runtime_endpoint=None,
+            runtime_image_digest=None,
+            runtime_started_at=None,
+        )
+    # If pull requested, temporarily force pull_policy=always for this provision
+    if pull:
+        project = get_project_row(member["project_id"]) or {}
+        try:
+            rt_cfg = json.loads(project.get("runtime_config") or "{}")
+        except json.JSONDecodeError:
+            rt_cfg = {}
+        # We honor pull_policy=always semantics by ensuring adapter pulls fresh.
+        # The Docker adapter pulls if policy is always; FakeRuntime always pulls.
+        # No DB write — this only affects this invocation.
+        rt = get_runtime_for_project({**rt_cfg, "image_pull_policy": "always"})
+        if rt is None:
+            raise HTTPException(400, "no runtime configured for this project")
+        # Direct provision so the override pull_policy is honored
+        await _set_member_runtime_state_async_starting(mid)
+        try:
+            snapshot = (member.get("config") or {}).get("agent_snapshot")
+            if not snapshot:
+                _set_member_runtime_state(mid, runtime_status="error",
+                                           runtime_error="missing agent_snapshot")
+            else:
+                result = await rt.provision(
+                    member_id=mid, project_slug=(get_project_row(member["project_id"]) or {}).get("slug", ""),
+                    snapshot=snapshot, config={**rt_cfg, "image_pull_policy": "always"},
+                )
+                _set_member_runtime_state(
+                    mid,
+                    runtime_status="running",
+                    runtime_container_id=result.container_id,
+                    runtime_endpoint=result.endpoint,
+                    runtime_image_digest=result.image_digest,
+                    runtime_started_at=now_iso(),
+                    runtime_error=None,
+                )
+        except Exception as e:  # noqa: BLE001
+            _set_member_runtime_state(mid, runtime_status="error", runtime_error=str(e))
+    else:
+        await _trigger_provision(mid, member["project_id"])
+    with db() as conn:
+        row = conn.execute("SELECT * FROM team_members WHERE id = ?", (mid,)).fetchone()
+    return _row_to_member(row)
+
+
+async def _set_member_runtime_state_async_starting(mid: int) -> None:
+    _set_member_runtime_state(mid, runtime_status="starting", runtime_error=None)
 
 
 # ---------- Tasks (auth required) ----------
