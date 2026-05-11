@@ -183,7 +183,22 @@
     width: 28px; height: 28px; border-radius: 50%; flex-shrink: 0;
     display: flex; align-items: center; justify-content: center;
     color: #0b1020; font-weight: 700; font-size: 12px;
+    position: relative;
   }
+  /* Bottom-right runtime status dot on the avatar — AI agents only */
+  .av-status {
+    position: absolute;
+    bottom: -2px; right: -2px;
+    width: 11px; height: 11px;
+    border-radius: 50%;
+    border: 2px solid var(--panel);   /* same as team-pane background */
+    box-sizing: content-box;
+  }
+  .av-status[data-status="running"]         { background: #4caf78; }
+  .av-status[data-status="starting"]        { background: #f0b429; animation: rt-pulse 1.4s infinite; }
+  .av-status[data-status="stopped"]         { background: #8a93a6; }
+  .av-status[data-status="not_provisioned"] { background: #8a93a6; }
+  .av-status[data-status="error"]           { background: #ff7171; }
   .member .info { flex: 1; min-width: 0; }
   .member .name {
     font-size: 13px; font-weight: 500;
@@ -502,6 +517,14 @@
 <div class="overlay" id="memOverlay">
   <div class="modal">
     <h3 id="memModalTitle">New team member</h3>
+    <!-- Name header — display mode (text + pencil) when editing; input mode when creating -->
+    <div id="m-nameHeaderRow" style="display:none;align-items:center;gap:8px;padding:4px 0 8px">
+      <span id="m-nameDisplay" style="font-size:16px;font-weight:600;flex:1"></span>
+      <button id="m-editNameBtn" type="button"
+              title="Edit name"
+              style="background:var(--panel2);color:var(--muted);border:1px solid var(--border);
+                     cursor:pointer;padding:4px 8px;border-radius:6px;font-size:12px">✎ Edit</button>
+    </div>
     <div id="m-typeRow">
       <label>Type</label>
       <div class="type-toggle">
@@ -519,8 +542,10 @@
         Selecting one pre-fills name and description from <code>config.yaml</code>.
       </div>
     </div>
-    <label>Name</label>
-    <input id="m-name" placeholder="e.g. Travis Tubbs, or coding-agent-1" />
+    <div id="m-nameInputRow">
+      <label>Name</label>
+      <input id="m-name" placeholder="e.g. Travis Tubbs, or coding-agent-1" />
+    </div>
     <div class="row">
       <div>
         <label>Role</label>
@@ -1284,16 +1309,17 @@ function renderTeam() {
     const typeTag = (m.type === "ai_agent" && m.agent_type)
       ? `<span class="agent-type-tag" title="agent type from ./agents/">${escapeHtml(m.agent_type)}</span>`
       : "";
-    const runtimeDot = m.type === "ai_agent"
-      ? `<span class="runtime-dot" data-status="${escapeHtml(m.runtime_status || "not_provisioned")}" title="runtime: ${escapeHtml(m.runtime_status || "not_provisioned")}"></span>`
+    const statusForTooltip = m.runtime_status || "not_provisioned";
+    const avStatus = m.type === "ai_agent"
+      ? `<span class="av-status" data-status="${escapeHtml(statusForTooltip)}" title="runtime: ${escapeHtml(statusForTooltip)}"></span>`
       : "";
     const updatePill = m.update_available
       ? `<button class="update-pill" data-update-mid="${m.id}" title="Newer image available. Click to update.">Update</button>`
       : "";
     row.innerHTML = `
-      <div class="av" style="background:${m.color}">${(m.name[0] || "?").toUpperCase()}</div>
+      <div class="av" style="background:${m.color}">${(m.name[0] || "?").toUpperCase()}${avStatus}</div>
       <div class="info">
-        <div class="name">${escapeHtml(m.name)} ${runtimeDot}</div>
+        <div class="name">${escapeHtml(m.name)}</div>
         <div class="role">${escapeHtml(m.role || (m.type === "ai_agent" ? "AI Agent" : "Member"))}</div>
       </div>
       <div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">
@@ -1366,6 +1392,8 @@ function openMemberModal(member = null) {
   document.getElementById("m-agent-type").value = member?.agent_type || "";
   // Type is immutable after creation — hide the toggle when editing
   document.getElementById("m-typeRow").style.display = member ? "none" : "";
+  // Name: display-mode-with-pencil when editing, input-mode when creating
+  setNameMode(member ? "display" : "input", member?.name || "");
   memberColor = member?.color || COLORS[0];
   renderMemberColors();
   document.getElementById("m-active").checked = member ? !!member.is_active : true;
@@ -1633,6 +1661,28 @@ function closeMemberModal() {
   document.getElementById("memOverlay").classList.remove("open");
   editingMemberId = null;
 }
+
+function setNameMode(mode, name) {
+  // mode: "display" (label + pencil, only meaningful when editing an existing member)
+  //       "input"   (text input, used on Create and after clicking the pencil)
+  const header = document.getElementById("m-nameHeaderRow");
+  const inputRow = document.getElementById("m-nameInputRow");
+  const input = document.getElementById("m-name");
+  input.value = name;
+  if (mode === "display") {
+    document.getElementById("m-nameDisplay").textContent = name || "—";
+    header.style.display = "flex";
+    inputRow.style.display = "none";
+  } else {
+    header.style.display = "none";
+    inputRow.style.display = "";
+    setTimeout(() => { input.focus(); input.select(); }, 0);
+  }
+}
+
+document.getElementById("m-editNameBtn").onclick = () => {
+  setNameMode("input", document.getElementById("m-name").value);
+};
 
 document.getElementById("memCancel").onclick = closeMemberModal;
 document.getElementById("memOverlay").onclick = (e) => {
