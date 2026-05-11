@@ -29,6 +29,20 @@ def _container_name(project_slug: str, member_id: int) -> str:
     return f"starforge-{project_slug}-member-{member_id}"
 
 
+def _normalize_memory(s: Optional[str]) -> Optional[str]:
+    """Accept Kubernetes-style (2Gi, 512Mi) or Docker-style (2g, 512m) units.
+    Docker SDK requires lowercase b/k/m/g without the 'i' suffix."""
+    if not s:
+        return None
+    s = s.strip()
+    mapping = {"Gi": "g", "Mi": "m", "Ki": "k", "Ti": "t",
+               "G": "g", "M": "m", "K": "k", "T": "t"}
+    for k, v in mapping.items():
+        if s.endswith(k):
+            return s[: -len(k)] + v
+    return s.lower()  # already e.g. "2g"
+
+
 class DockerRuntime(RuntimeAdapter):
     def __init__(self, project_config: dict[str, Any]) -> None:
         # Lazy-import so unit tests don't need the docker SDK installed.
@@ -115,7 +129,7 @@ class DockerRuntime(RuntimeAdapter):
         network = config.get("network")
         if network:
             kwargs["network"] = network
-        mem_limit = config.get("memory_limit")
+        mem_limit = _normalize_memory(config.get("memory_limit"))
         if mem_limit:
             kwargs["mem_limit"] = mem_limit
         cpu_limit = config.get("cpu_limit")
