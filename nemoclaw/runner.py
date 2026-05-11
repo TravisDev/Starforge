@@ -362,12 +362,34 @@ async def _run_agent(
             }
         else:
             # Task mode: tool-using loop
-            task_intro = (
-                f"You have been assigned task #{task_id}:\n"
-                f"Title: {inputs.get('task_title', '')}\n"
-                f"Description: {inputs.get('task_description', '')}\n\n"
-                "Start by setting status to in_progress."
-            )
+            intro_parts = [
+                f"You have been assigned task #{task_id}:",
+                f"Title: {inputs.get('task_title', '')}",
+                f"Description: {inputs.get('task_description', '')}",
+            ]
+            prior = inputs.get("prior_comments") or []
+            if prior:
+                intro_parts.append("")
+                intro_parts.append(
+                    f"PRIOR COMMENT HISTORY on this task ({len(prior)} entries) — "
+                    "this is a re-try. Read carefully; incorporate the feedback "
+                    "below into your fresh investigation."
+                )
+                for c in prior:
+                    kind = c.get("author_kind", "user")
+                    name = c.get("author_name", "?")
+                    body = (c.get("body") or "").strip()
+                    when = (c.get("created_at") or "")[:19]   # trim subseconds
+                    intro_parts.append(f"  · [{kind}: {name} @ {when}] {body}")
+                intro_parts.append("")
+                intro_parts.append(
+                    "If a previous run's findings appear above, do NOT just repeat them. "
+                    "Look for what the human reviewer questioned, what evidence is missing, "
+                    "or what new angle to try."
+                )
+            intro_parts.append("")
+            intro_parts.append("Start by setting status to in_progress.")
+            task_intro = "\n".join(intro_parts)
             messages: list[dict[str, Any]] = [
                 {"role": "system", "content": system_prompt + "\n\n" + _TOOL_INSTRUCTIONS},
                 {"role": "user", "content": task_intro},

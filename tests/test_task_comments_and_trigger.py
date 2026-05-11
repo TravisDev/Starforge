@@ -208,6 +208,34 @@ def test_assignment_trigger_skips_human_assignee(admin_client, fake_runtime):
         app._invoke_http_override = None
 
 
+def test_retry_includes_prior_comments_in_dispatch_inputs(admin_client, fake_runtime):
+    """When the trigger fires, the dispatch should include any existing comments
+    so the agent has rejection / re-try context. Set up the task unassigned
+    first, post a comment, then assign — to avoid racing with the create-time
+    trigger."""
+    import app
+    p = _new_project(admin_client, "Re-try With Context")
+    _configure_runtime(admin_client, p["id"])
+    member = _create_ai_member(admin_client, p["id"])
+    t = _new_task(admin_client, p["id"], "needs re-investigation")
+    # Drop a comment before assignment so the trigger picks it up
+    admin_client.post(f"/api/tasks/{t['id']}/comments",
+                       json={"body": "Reviewer: please verify with curl, not ping"})
+    dispatcher = _RecordingDispatcher()
+    app._invoke_http_override = dispatcher
+    try:
+        admin_client.patch(f"/tasks/{t['id']}", json={"assignee_id": member["id"]})
+        asyncio.run(asyncio.sleep(0.1))
+        relevant = [c for c in dispatcher.calls
+                     if c["payload"]["inputs"].get("task_id") == t["id"]]
+        assert relevant, "expected at least one dispatch for the assigned task"
+        comments = relevant[-1]["payload"]["inputs"].get("prior_comments") or []
+        assert any("verify with curl" in c["body"] for c in comments)
+        assert any(c["author_kind"] == "user" for c in comments)
+    finally:
+        app._invoke_http_override = None
+
+
 def test_moving_back_to_todo_triggers_run(admin_client, fake_runtime):
     """Dragging a task back into the todo column should re-notify the assigned agent."""
     import app

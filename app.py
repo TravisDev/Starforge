@@ -1782,11 +1782,31 @@ async def _maybe_trigger_agent_for_task(task: dict[str, Any]) -> None:
 
     callback_token = ensure_project_callback_token(project["id"])
     run_id = str(uuid.uuid4())
+
+    # Pull existing comments so the agent has the rejection / re-try context
+    # of "what was said last time" when it's invoked. Trimmed shape — author
+    # kind/name + body + timestamp — keeps the prompt token-cost reasonable
+    # while giving the LLM enough to act on.
+    prior_comments: list[dict[str, Any]] = []
+    with db() as conn:
+        comment_rows = conn.execute(
+            "SELECT * FROM task_comments WHERE task_id = ? ORDER BY created_at ASC",
+            (task["id"],),
+        ).fetchall()
+    for c in _hydrate_comments(comment_rows):
+        prior_comments.append({
+            "author_kind": c.get("author_kind") or "user",
+            "author_name": c.get("author_name") or "—",
+            "body": c.get("body") or "",
+            "created_at": c.get("created_at") or "",
+        })
+
     inputs = {
         "task_id": task["id"],
         "task_title": task.get("title", ""),
         "task_description": task.get("description", "") or "",
         "task_status": task.get("status", ""),
+        "prior_comments": prior_comments,
     }
     with db() as conn:
         conn.execute(
