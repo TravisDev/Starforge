@@ -20,6 +20,8 @@ import httpx
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Header
 from pydantic import BaseModel
 
+from tools import TOOL_INSTRUCTIONS, ToolContext, execute_tool, parse_tool_call
+
 # ---------- Snapshot bootstrap (env or mounted file) ----------
 
 SNAPSHOT_ENV = "AGENT_SNAPSHOT_JSON"
@@ -33,8 +35,6 @@ STARFORGE_MEMBER_ID = os.environ.get("STARFORGE_MEMBER_ID", "")
 
 # Task-mode tool loop limits
 TOOL_LOOP_MAX_ITER = 12
-TOOL_HTTP_TIMEOUT = 10.0
-TOOL_HTTP_BODY_PREVIEW = 800
 
 logging.basicConfig(level=logging.INFO, format="[nemoclaw] %(message)s")
 log = logging.getLogger("nemoclaw")
@@ -241,152 +241,6 @@ async def _llm_completion(
     raise RuntimeError(f"unknown provider: {provider!r}")
 
 
-_TOOL_INSTRUCTIONS = """
-You have been assigned a task. Use the tools below to investigate and report back.
-
-RESPOND WITH EXACTLY ONE JSON OBJECT PER TURN, NO OTHER TEXT, NO MARKDOWN FENCES.
-
-Available tools:
-{"tool": "http_get", "url": "..."}                          — fetch a URL
-{"tool": "set_task_status", "status": "in_progress"}        — also: "under_review", "done"
-{"tool": "add_comment", "body": "..."}                      — post a comment with your findings
-{"tool": "create_agent_type", "spec": {...}}                — (meta-agents only) draft a new agent type
-{"tool": "finish"}                                          — end the run
-
-REQUIRED WORKFLOW:
-1. First turn: call set_task_status with status="in_progress"
-2. Investigation turns: call http_get (or other tools) to gather evidence
-3. When you have findings: call add_comment with a clear, evidence-backed summary
-4. Then: call set_task_status with status="under_review"
-5. Then: call finish
-
-After each tool call I will tell you the result; then respond with the next tool call.
-DO NOT WRITE PROSE. ONLY ONE JSON OBJECT PER RESPONSE.
-""".strip()
-
-
-def _parse_tool_call(text: str) -> Optional[dict[str, Any]]:
-    """Pull the first JSON object containing a 'tool' field out of the LLM response."""
-    if not text:
-        return None
-    # Strip markdown fences if present
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        # Remove ``` ... ``` wrappers
-        cleaned = cleaned.strip("`")
-        if cleaned.lower().startswith("json"):
-            cleaned = cleaned[4:]
-        cleaned = cleaned.strip()
-    # Try direct parse first
-    for candidate in (cleaned, _extract_first_json_object(cleaned)):
-        if not candidate:
-            continue
-        try:
-            obj = json.loads(candidate)
-            if isinstance(obj, dict) and "tool" in obj:
-                return obj
-        except (json.JSONDecodeError, ValueError):
-            continue
-    return None
-
-
-def _extract_first_json_object(text: str) -> Optional[str]:
-    """Best-effort: find the first {...} that's a balanced JSON object."""
-    depth = 0
-    start = None
-    in_str = False
-    esc = False
-    for i, ch in enumerate(text):
-        if esc:
-            esc = False
-            continue
-        if ch == "\\":
-            esc = True
-            continue
-        if ch == '"':
-            in_str = not in_str
-            continue
-        if in_str:
-            continue
-        if ch == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0 and start is not None:
-                return text[start: i + 1]
-    return None
-
-
-async def _tool_http_get(url: str) -> str:
-    try:
-        async with httpx.AsyncClient(timeout=TOOL_HTTP_TIMEOUT, follow_redirects=True) as client:
-            r = await client.get(url)
-        body = r.text[:TOOL_HTTP_BODY_PREVIEW]
-        truncated = "" if len(r.text) <= TOOL_HTTP_BODY_PREVIEW else f"\n[truncated, total {len(r.text)} bytes]"
-        return f"HTTP {r.status_code} from {url}\nheaders: {dict(r.headers)}\nbody:\n{body}{truncated}"
-    except httpx.TimeoutException:
-        return f"HTTP timeout (>{TOOL_HTTP_TIMEOUT}s) fetching {url}"
-    except Exception as e:  # noqa: BLE001
-        return f"HTTP error fetching {url}: {e}"
-
-
-async def _tool_create_agent_type(
-    *, spec: dict[str, Any], callback_url: str, callback_token: str,
-) -> str:
-    """Forward a spec from the agent-builder to Starforge's /api/agent-types.
-    Creates a draft that an admin must activate."""
-    if not callback_url or not STARFORGE_MEMBER_ID:
-        return "error: cannot draft agent type — missing callback_url or member id"
-    if not isinstance(spec, dict):
-        return f"error: spec must be an object, got {type(spec).__name__}"
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.post(
-                f"{callback_url.rstrip('/')}/api/agent-types"
-                f"?created_by_member_id={STARFORGE_MEMBER_ID}",
-                json=spec,
-                headers={"Authorization": f"Bearer {callback_token}"},
-            )
-        if r.status_code >= 400:
-            return f"create_agent_type error: HTTP {r.status_code} {r.text[:300]}"
-        return (
-            f"ok: agent type '{spec.get('slug', '?')}' drafted. "
-            "An admin must activate it before it appears in the team-member dropdown."
-        )
-    except Exception as e:  # noqa: BLE001
-        return f"create_agent_type error: {e}"
-
-
-async def _tool_task_action(
-    *, action_type: str, task_id: int, callback_url: str, callback_token: str,
-    status: Optional[str] = None, body: Optional[str] = None,
-) -> str:
-    if not callback_url or not STARFORGE_MEMBER_ID:
-        return f"error: cannot perform {action_type} — missing callback_url or member id"
-    payload = {
-        "agent_member_id": int(STARFORGE_MEMBER_ID),
-        "task_id": task_id,
-        "actions": [
-            {"type": action_type, **({"status": status} if status else {}),
-                                  **({"body": body} if body else {})}
-        ],
-    }
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.post(
-                f"{callback_url.rstrip('/')}/api/agents/task-actions",
-                json=payload,
-                headers={"Authorization": f"Bearer {callback_token}"},
-            )
-        if r.status_code >= 400:
-            return f"task-action error: HTTP {r.status_code} {r.text[:200]}"
-        return f"ok: {action_type} applied"
-    except Exception as e:  # noqa: BLE001
-        return f"task-action error: {e}"
-
-
 async def _run_agent(
     *, run_id: str, inputs: dict[str, Any],
     callback_url: str, callback_token: str,
@@ -496,9 +350,16 @@ async def _run_agent(
                 intro_parts.append("Start by setting status to in_progress.")
                 task_intro = "\n".join(intro_parts)
             messages: list[dict[str, Any]] = [
-                {"role": "system", "content": system_prompt + "\n\n" + _TOOL_INSTRUCTIONS},
+                {"role": "system", "content": system_prompt + "\n\n" + TOOL_INSTRUCTIONS},
                 {"role": "user", "content": task_intro},
             ]
+            ctx = ToolContext(
+                task_id=task_id,
+                callback_url=callback_url,
+                callback_token=callback_token,
+                member_id=STARFORGE_MEMBER_ID,
+                mode=mode,
+            )
             total_in = 0
             total_out = 0
             outputs: list[str] = []
@@ -511,53 +372,22 @@ async def _run_agent(
                 if t_in: total_in += t_in
                 if t_out: total_out += t_out
                 messages.append({"role": "assistant", "content": text})
-                tool = _parse_tool_call(text)
+                tool = parse_tool_call(text)
                 if not tool:
                     outputs.append(f"[iter {i+1}] non-tool response: {text[:300]}")
-                    # Nudge the model back to JSON
                     messages.append({"role": "user", "content":
                         "Your response was not a single JSON tool call. "
                         "Respond with EXACTLY one JSON object like "
                         '{"tool": "...", ...} and nothing else.'})
                     continue
-                name = tool.get("tool")
-                outputs.append(f"[iter {i+1}] {name}: {json.dumps(tool)[:200]}")
-                if name == "finish":
+                outputs.append(f"[iter {i+1}] {tool.get('tool')}: {json.dumps(tool)[:200]}")
+                res, is_finish = await execute_tool(tool, ctx)
+                if is_finish:
                     finished = True
                     break
-                elif name == "http_get":
-                    url = tool.get("url", "")
-                    res = await _tool_http_get(url)
-                elif name == "set_task_status":
-                    if mode == "comment_reply":
-                        # Hard guard: chat mode never changes task status, even if
-                        # the LLM tries to. The user controls workflow state.
-                        res = ("set_task_status is NOT AVAILABLE in this chat mode. "
-                               "The task status will stay exactly where it is. "
-                               "Just call add_comment with your reply, then finish.")
-                    else:
-                        res = await _tool_task_action(
-                            action_type="set_status", task_id=task_id,
-                            callback_url=callback_url, callback_token=callback_token,
-                            status=tool.get("status"),
-                        )
-                elif name == "add_comment":
-                    res = await _tool_task_action(
-                        action_type="comment", task_id=task_id,
-                        callback_url=callback_url, callback_token=callback_token,
-                        body=tool.get("body"),
-                    )
-                elif name == "create_agent_type":
-                    res = await _tool_create_agent_type(
-                        spec=tool.get("spec") or {},
-                        callback_url=callback_url,
-                        callback_token=callback_token,
-                    )
-                else:
-                    res = f"unknown tool: {name!r}"
                 messages.append({"role": "user", "content": f"Tool result: {res}"})
             result = {
-                "status": "succeeded" if finished else "succeeded",
+                "status": "succeeded",
                 "output": "\n".join(outputs) + ("\n[max iterations reached]" if not finished else ""),
                 "tokens_in": total_in or None,
                 "tokens_out": total_out or None,

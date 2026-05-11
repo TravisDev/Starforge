@@ -10,7 +10,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-COPY runner.py .
+COPY runner.py tools.py ./
 
 EXPOSE 8080
 
