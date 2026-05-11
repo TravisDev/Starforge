@@ -1497,7 +1497,35 @@ async def member_runtime_start(mid: int, _: dict = Depends(current_user)):
 
     if cid:
         await rt.start(cid)
-        _set_member_runtime_state(mid, runtime_status="running", runtime_error=None)
+        # Verify it actually came up and refresh endpoint in case Docker reassigned ports.
+        after = await rt.inspect(cid)
+        if after is None:
+            # Container vanished between our inspect and start — race / external rm.
+            _set_member_runtime_state(
+                mid,
+                runtime_status="not_provisioned",
+                runtime_container_id=None,
+                runtime_endpoint=None,
+                runtime_image_digest=None,
+                runtime_started_at=None,
+                runtime_error="container disappeared during start",
+            )
+            await _trigger_provision(mid, member["project_id"])
+        elif after.status != "running":
+            _set_member_runtime_state(
+                mid,
+                runtime_status="error",
+                runtime_error=f"docker reports container status: {after.status}",
+            )
+            raise HTTPException(500, f"container failed to start: {after.status}")
+        else:
+            updates: dict[str, Any] = {
+                "runtime_status": "running", "runtime_error": None,
+                "runtime_started_at": now_iso(),
+            }
+            if after.endpoint:
+                updates["runtime_endpoint"] = after.endpoint
+            _set_member_runtime_state(mid, **updates)
     else:
         await _trigger_provision(mid, member["project_id"])
     with db() as conn:
@@ -1994,7 +2022,7 @@ async def post_agent_run_result(run_id: str, body: RunResult, request: Request):
     return {"ok": True}
 
 
-HEALTH_CHECK_INTERVAL = 30  # seconds — fast-ish so killed containers surface within ~30s
+HEALTH_CHECK_INTERVAL = 10  # seconds — keep tight so externally stop/start cycles flip the UI promptly
 
 
 async def check_member_health(member_id: int) -> Optional[str]:

@@ -536,7 +536,7 @@
         Selecting one pre-fills name and description from <code>config.yaml</code>.
       </div>
     </div>
-    <div class="row">
+    <div class="row" id="m-humanFields">
       <div>
         <label>Role</label>
         <input id="m-role" placeholder="e.g. DevOps Engineer" />
@@ -1351,6 +1351,8 @@ function setMemberType(t) {
     b.classList.toggle("active", b.dataset.type === t));
   document.getElementById("m-aiHint").style.display = t === "ai_agent" ? "" : "none";
   document.getElementById("m-agentTypeRow").style.display = t === "ai_agent" ? "" : "none";
+  // Role / email are noise on AI agents — type + agent_type already describe them
+  document.getElementById("m-humanFields").style.display = t === "ai_agent" ? "none" : "";
   if (t !== "ai_agent") document.getElementById("m-agent-type").value = "";
 }
 
