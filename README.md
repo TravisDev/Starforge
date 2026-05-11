@@ -6,6 +6,15 @@ A slim, API-first Kanban + project + (planned) agent-management app for orchestr
 
 ![Starforge Kanban board with team pane and four-status columns](screenshots/board.png)
 
+### A quick tour
+
+| | |
+|---|---|
+| ![Back-and-forth conversation between a user and the assigned AI agent in a task's comment thread](screenshots/task-with-comments.png) | ![Projects management page listing every project's name, slug, task count, and status](screenshots/projects-page.png) |
+| **Task with agent conversation** — assigned an AI member to a task and now chatting with them inline. The agent posted findings, you replied "are you sure?" without an `@`-mention, and the trigger picked them up implicitly. | **Projects page** — every project the team works in. Each carries its own runtime config + secrets. |
+| ![Admin Settings page showing SSO providers, AI agent runtime image-update interval, and active sessions](screenshots/settings-page.png) | |
+| **Admin Settings** — register OIDC SSO providers (Keycloak, Authentik, etc.), tune how often Starforge polls registries for newer agent images, and see + revoke every active session. | |
+
 ---
 
 ## Quick Start
