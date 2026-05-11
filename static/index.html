@@ -221,6 +221,43 @@
     background: var(--panel2); border: 1px solid var(--border);
     border-radius: 6px; line-height: 1.4;
   }
+
+  /* Agent snapshot panel inside the member modal */
+  .snapshot-box {
+    border: 1px solid var(--border); border-radius: 6px;
+    background: var(--panel2); padding: 10px; font-size: 12px;
+  }
+  .snapshot-box .row1 {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
+  }
+  .snapshot-box .status {
+    font-size: 10px; padding: 2px 8px; border-radius: 999px;
+    text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600;
+  }
+  .snapshot-box .status.fresh { background: rgba(76,175,120,0.15); color: var(--good, #4caf78); }
+  .snapshot-box .status.stale { background: rgba(240,180,41,0.15); color: #f0b429; }
+  .snapshot-box .status.missing { background: rgba(255,113,113,0.15); color: var(--error, #ff7171); }
+  .snapshot-box .status.unbound { background: var(--panel); color: var(--muted); }
+  .snapshot-box button.refresh {
+    margin-left: auto; background: var(--panel); color: var(--text);
+    border: 1px solid var(--border); padding: 4px 10px; border-radius: 6px;
+    font: inherit; font-size: 11px; cursor: pointer;
+  }
+  .snapshot-box button.refresh:hover { border-color: var(--accent); color: var(--accent); }
+  .snapshot-box .meta {
+    color: var(--muted); font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 11px; line-height: 1.5; word-break: break-all;
+  }
+  .snapshot-box details { margin-top: 6px; }
+  .snapshot-box details summary {
+    cursor: pointer; color: var(--accent); font-size: 11px; margin-bottom: 4px;
+  }
+  .snapshot-box pre {
+    margin: 4px 0 0; padding: 8px; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 4px;
+    max-height: 180px; overflow: auto; font-size: 11px;
+    white-space: pre-wrap; word-break: break-word;
+  }
   .col {
     background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
     display: flex; flex-direction: column; min-height: 0;
@@ -372,8 +409,12 @@
     <label>Color</label>
     <div class="colors" id="m-colors"></div>
     <div class="ai-hint" id="m-aiHint" style="display:none">
-      AI Agent workflow, guardrails, tools, and runtime configuration will be added in Phase B.
-      For now this just registers the agent in the team roster.
+      AI Agent runtime invocation (calling out to nemoclaw) is Phase C and not yet wired up.
+      The agent's prompt + guardrails are snapshotted from <code>./agents/</code> on save.
+    </div>
+    <div id="m-snapshotRow" style="display:none">
+      <label>Agent snapshot</label>
+      <div class="snapshot-box" id="m-snapshot"></div>
     </div>
     <div id="m-activeRow" style="display:none;font-size:12px;color:var(--muted)">
       <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
@@ -887,8 +928,82 @@ function openMemberModal(member = null) {
   document.getElementById("m-active").checked = member ? !!member.is_active : true;
   document.getElementById("m-activeRow").style.display = member ? "" : "none";
   document.getElementById("memDelete").style.display = member ? "" : "none";
+  // Snapshot panel: only visible when editing an existing AI agent member
+  const showSnap = !!member && member.type === "ai_agent";
+  document.getElementById("m-snapshotRow").style.display = showSnap ? "" : "none";
+  if (showSnap) loadMemberSnapshot(member.id);
   document.getElementById("memOverlay").classList.add("open");
   document.getElementById("m-name").focus();
+}
+
+async function loadMemberSnapshot(memberId) {
+  const box = document.getElementById("m-snapshot");
+  box.innerHTML = '<div class="meta">loading…</div>';
+  try {
+    const r = await fetch(`/api/team-members/${memberId}/agent-snapshot`);
+    if (!r.ok) throw new Error(`${r.status}`);
+    const data = await r.json();
+    renderMemberSnapshot(memberId, data);
+  } catch (e) {
+    box.innerHTML = `<div class="meta">could not load snapshot: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function renderMemberSnapshot(memberId, data) {
+  const box = document.getElementById("m-snapshot");
+  if (!data.snapshot) {
+    box.innerHTML = `
+      <div class="row1">
+        <span class="status unbound">Not bound</span>
+        <span class="meta">No agent type selected. Pick one above and save to snapshot it.</span>
+      </div>`;
+    return;
+  }
+  const s = data.snapshot;
+  let statusClass = "fresh", statusLabel = "Fresh";
+  if (data.source_missing) { statusClass = "missing"; statusLabel = "Source missing"; }
+  else if (data.is_stale) { statusClass = "stale"; statusLabel = "Stale"; }
+
+  const promptPreview = (s.system_prompt || "").slice(0, 600);
+  const promptTruncated = (s.system_prompt || "").length > 600;
+  const guardJson = JSON.stringify(s.guardrails || {}, null, 2);
+
+  box.innerHTML = `
+    <div class="row1">
+      <span class="status ${statusClass}">${statusLabel}</span>
+      <span class="meta">${escapeHtml(s.agent_type)}</span>
+      <button class="refresh" id="m-refreshSnap" ${data.source_missing ? "disabled" : ""}>Refresh from source</button>
+    </div>
+    <div class="meta">
+      sources: ${escapeHtml(s.sources.config || "—")} ·
+      ${escapeHtml(s.sources.system_prompt || "—")} ·
+      ${escapeHtml(s.sources.guardrails || "—")}
+      <br/>snapshot: ${escapeHtml(s.snapshot_at)} · hash: ${escapeHtml((s.content_hash || "").slice(0, 12))}…
+      ${data.is_stale ? `<br/>current source hash: ${escapeHtml((data.current_hash || "").slice(0, 12))}… — click Refresh to update.` : ""}
+      ${data.source_missing ? "<br/>The agent directory no longer exists on disk. Restore it or unbind this member." : ""}
+    </div>
+    <details>
+      <summary>system_prompt (${(s.system_prompt || "").length} chars)</summary>
+      <pre>${escapeHtml(promptPreview)}${promptTruncated ? "\n\n[truncated]" : ""}</pre>
+    </details>
+    <details>
+      <summary>guardrails</summary>
+      <pre>${escapeHtml(guardJson)}</pre>
+    </details>`;
+
+  const btn = document.getElementById("m-refreshSnap");
+  if (btn) btn.onclick = async () => {
+    btn.disabled = true; btn.textContent = "Refreshing…";
+    try {
+      const r = await fetch(`/api/team-members/${memberId}/refresh-snapshot`, { method: "POST" });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `${r.status}`);
+      await loadMemberSnapshot(memberId);
+      await loadTeam();
+    } catch (e) {
+      alert("refresh failed: " + e.message);
+      btn.disabled = false; btn.textContent = "Refresh from source";
+    }
+  };
 }
 
 document.getElementById("m-agent-type").addEventListener("change", () => {

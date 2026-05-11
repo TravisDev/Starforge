@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -283,6 +284,116 @@ def list_agent_types() -> list[dict[str, Any]]:
 
 def get_agent_type_slugs() -> set[str]:
     return {t["slug"] for t in list_agent_types()}
+
+
+# ---------- Agent snapshot resolver ----------
+#
+# When a team_member is bound to an agent_type, we resolve agents/<slug>/config.yaml
+# (and any source: file references inside it) into a single self-contained snapshot
+# that gets persisted into team_members.config.
+#
+# The snapshot includes a SHA-256 content hash so the UI can detect when the
+# source files on disk have drifted from the persisted snapshot and surface a
+# "refresh from source" prompt to the operator.
+#
+# Why snapshot-at-save rather than resolve-at-invoke:
+# - Reproducible agent runs (the prompt is pinned, not chasing HEAD).
+# - No live filesystem (or, later, network) dependency on the invocation hot path.
+# - Changes to source files surface as an explicit operator action, not a silent
+#   behavior change under a live agent.
+
+
+def _content_hash_from_parts(*parts: bytes) -> str:
+    h = hashlib.sha256()
+    for p in parts:
+        # length-prefix each part so different chunkings can't collide
+        h.update(len(p).to_bytes(8, "big"))
+        h.update(p)
+    return h.hexdigest()
+
+
+def _resolve_content_field(
+    value: Any, agent_dir: Path
+) -> tuple[Any, Optional[str], bytes]:
+    """Resolve a content field that may be inline / source:file / source:git.
+
+    Returns (resolved_content, source_relative_path_or_None, raw_bytes_for_hashing).
+    """
+    if value is None:
+        return None, None, b""
+    if isinstance(value, str):
+        return value, None, value.encode("utf-8")
+    if isinstance(value, dict):
+        source = value.get("source")
+        if source == "file":
+            rel = value.get("path", "")
+            full = agent_dir / rel
+            if not full.exists():
+                raise HTTPException(400, f"referenced file missing: {full}")
+            raw = full.read_bytes()
+            if full.suffix in (".yaml", ".yml"):
+                try:
+                    content: Any = yaml.safe_load(raw.decode("utf-8")) or {}
+                except yaml.YAMLError as e:
+                    raise HTTPException(400, f"invalid YAML in {full}: {e}")
+            else:
+                content = raw.decode("utf-8")
+            return content, rel, raw
+        if source == "git":
+            raise HTTPException(
+                501,
+                "git-sourced agent content is on the roadmap but not yet implemented; "
+                "use source: file with content checked into ./agents/<slug>/",
+            )
+    # Pass-through for unrecognized shapes (e.g., inline structured guardrails)
+    return value, None, json.dumps(value, sort_keys=True).encode("utf-8")
+
+
+def resolve_agent_snapshot(slug: str) -> dict[str, Any]:
+    """Read agents/<slug>/ and produce a self-contained snapshot dict."""
+    agent_dir = AGENTS_DIR / slug
+    if not agent_dir.is_dir():
+        raise HTTPException(404, f"agent type '{slug}' not found in ./agents/")
+    cfg_path = agent_dir / "config.yaml"
+    if not cfg_path.exists():
+        raise HTTPException(400, f"agents/{slug}/config.yaml missing")
+
+    cfg_bytes = cfg_path.read_bytes()
+    try:
+        cfg_data: dict[str, Any] = yaml.safe_load(cfg_bytes.decode("utf-8")) or {}
+    except yaml.YAMLError as e:
+        raise HTTPException(400, f"invalid YAML in {cfg_path}: {e}")
+
+    agent_section = cfg_data.get("agent", {}) or {}
+
+    prompt, prompt_src, prompt_raw = _resolve_content_field(
+        agent_section.get("system_prompt"), agent_dir
+    )
+    guardrails, guard_src, guard_raw = _resolve_content_field(
+        agent_section.get("guardrails"), agent_dir
+    )
+
+    return {
+        "snapshot_at": now_iso(),
+        "agent_type": slug,
+        "content_hash": _content_hash_from_parts(cfg_bytes, prompt_raw, guard_raw),
+        "sources": {
+            "config": f"agents/{slug}/config.yaml",
+            "system_prompt": f"agents/{slug}/{prompt_src}" if prompt_src else None,
+            "guardrails": f"agents/{slug}/{guard_src}" if guard_src else None,
+        },
+        "config": cfg_data,
+        "system_prompt": prompt,
+        "guardrails": guardrails,
+    }
+
+
+def current_snapshot_hash(slug: str) -> Optional[str]:
+    """Compute today's content hash for `slug` without persisting. None if missing."""
+    try:
+        return resolve_agent_snapshot(slug)["content_hash"]
+    except HTTPException:
+        return None
 
 
 # ---------- Page routes (gating) ----------
@@ -710,15 +821,20 @@ async def create_member(pid: int, body: TeamMemberCreate, user: dict = Depends(c
             raise HTTPException(400, "agent_type is only valid for ai_agent members")
         if body.agent_type not in get_agent_type_slugs():
             raise HTTPException(400, f"unknown agent_type: {body.agent_type}")
+
+    config_blob: dict[str, Any] = {}
+    if body.agent_type:
+        config_blob["agent_snapshot"] = resolve_agent_snapshot(body.agent_type)
+
     ts = now_iso()
     with db() as conn:
         cur = conn.execute(
             """INSERT INTO team_members
                (project_id, name, type, email, role, description, color, is_active,
                 config, agent_type, created_by, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 1, '{}', ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)""",
             (pid, body.name, body.type, body.email, body.role, body.description,
-             body.color, body.agent_type, user["id"], ts, ts),
+             body.color, json.dumps(config_blob), body.agent_type, user["id"], ts, ts),
         )
         row = conn.execute("SELECT * FROM team_members WHERE id = ?", (cur.lastrowid,)).fetchone()
     return _row_to_member(row)
@@ -743,6 +859,21 @@ async def update_member(mid: int, body: TeamMemberUpdate, _: dict = Depends(curr
             raise HTTPException(400, "agent_type is only valid for ai_agent members")
         if data["agent_type"] not in get_agent_type_slugs():
             raise HTTPException(400, f"unknown agent_type: {data['agent_type']}")
+
+    # If agent_type is being added or changed, refresh the snapshot.
+    # If cleared (set to None or empty), drop the snapshot.
+    if "agent_type" in data:
+        existing_config_raw = existing["config"] or "{}"
+        try:
+            existing_config = json.loads(existing_config_raw)
+        except json.JSONDecodeError:
+            existing_config = {}
+        new_at = data["agent_type"]
+        if new_at:
+            existing_config["agent_snapshot"] = resolve_agent_snapshot(new_at)
+        else:
+            existing_config.pop("agent_snapshot", None)
+        data["config"] = json.dumps(existing_config)
     fields, params = [], []
     for k, v in data.items():
         fields.append(f"{k} = ?")
@@ -762,6 +893,53 @@ async def update_member(mid: int, body: TeamMemberUpdate, _: dict = Depends(curr
 async def api_agent_types(_: dict = Depends(current_user)):
     """List AI agent types defined under ./agents/ in the repo."""
     return list_agent_types()
+
+
+@app.get("/api/team-members/{mid}/agent-snapshot")
+async def get_member_agent_snapshot(mid: int, _: dict = Depends(current_user)):
+    """Return the persisted agent snapshot plus a freshness check against the source files."""
+    with db() as conn:
+        row = conn.execute("SELECT * FROM team_members WHERE id = ?", (mid,)).fetchone()
+    if not row:
+        raise HTTPException(404, "team member not found")
+    member = _row_to_member(row)
+    snapshot = (member.get("config") or {}).get("agent_snapshot")
+    if not snapshot:
+        return {
+            "snapshot": None,
+            "current_hash": None,
+            "is_stale": False,
+            "source_missing": False,
+        }
+    current = current_snapshot_hash(snapshot["agent_type"])
+    return {
+        "snapshot": snapshot,
+        "current_hash": current,
+        "is_stale": current is not None and current != snapshot["content_hash"],
+        "source_missing": current is None,
+    }
+
+
+@app.post("/api/team-members/{mid}/refresh-snapshot")
+async def refresh_member_agent_snapshot(mid: int, _: dict = Depends(current_user)):
+    """Re-resolve agents/<slug>/ from disk and persist a new snapshot for this member."""
+    with db() as conn:
+        row = conn.execute("SELECT * FROM team_members WHERE id = ?", (mid,)).fetchone()
+    if not row:
+        raise HTTPException(404, "team member not found")
+    member = _row_to_member(row)
+    slug = member.get("agent_type")
+    if not slug:
+        raise HTTPException(400, "this member is not bound to an agent_type")
+    config = dict(member.get("config") or {})
+    config["agent_snapshot"] = resolve_agent_snapshot(slug)
+    with db() as conn:
+        conn.execute(
+            "UPDATE team_members SET config = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(config), now_iso(), mid),
+        )
+        row = conn.execute("SELECT * FROM team_members WHERE id = ?", (mid,)).fetchone()
+    return _row_to_member(row)
 
 
 @app.delete("/api/team-members/{mid}", status_code=204)
