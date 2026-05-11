@@ -2,10 +2,10 @@
 
 Stub runtime container for Starforge AI-agent team members.
 
-> **Status: stub.** Receives an agent snapshot at startup, exposes `/healthz`,
-> doesn't yet do any LLM invocation. The real invocation path is Phase C work.
-> This stub exists so Phase B (container lifecycle) has something concrete to
-> spawn and test against.
+> **Status: C.1 — real Claude invocation, no tools or guardrails yet.**
+> /invoke now calls the Claude API with the agent's system prompt + your
+> inputs and posts the result back to Starforge. Tools (C.3) and NeMo
+> Guardrails enforcement (C.2) are next.
 
 ## How it fits
 
@@ -35,11 +35,23 @@ The snapshot shape is whatever `Starforge.resolve_agent_snapshot()` produces.
 
 ## Endpoints
 
-| Method | Path        | What it does                                                       |
-|--------|-------------|--------------------------------------------------------------------|
-| GET    | `/healthz`  | Liveness. Returns `{ok, loaded_at, has_snapshot, agent_type}`.     |
-| GET    | `/agent`    | The loaded snapshot as JSON (or an error if none was provided).    |
-| POST   | `/invoke`   | Stub — returns "not yet implemented." Phase C wires the real path. |
+| Method | Path              | What it does                                                             |
+|--------|-------------------|--------------------------------------------------------------------------|
+| GET    | `/healthz`        | Liveness. Returns `{ok, loaded_at, has_snapshot, agent_type, anthropic_key_present}`. |
+| GET    | `/agent`          | The loaded snapshot as JSON (or an error if none was provided).          |
+| POST   | `/invoke`         | Accepts `{run_id, callback_url, callback_token, inputs, snapshot}`. Returns 202 immediately and runs Claude in the background; POSTs the final result to `{callback_url}/api/agent-runs/{run_id}/result`. |
+| DELETE | `/runs/{run_id}`  | Best-effort cancel of an in-flight run.                                  |
+
+All write endpoints require `Authorization: Bearer {STARFORGE_CALLBACK_TOKEN}` if that env var is set.
+
+## Required env vars for C.1
+
+| Var | Purpose |
+|---|---|
+| `AGENT_SNAPSHOT_JSON` *or* `AGENT_SNAPSHOT_FILE` | The agent snapshot the container holds. |
+| `ANTHROPIC_API_KEY` | Used to call the Claude API. |
+| `STARFORGE_CALLBACK_TOKEN` | Shared bearer token (per-project). Validates incoming /invoke and is forwarded as Authorization on the result callback. |
+| `STARFORGE_CALLBACK_URL` | (Optional fallback) — usually overridden per-run by the `callback_url` field in the request body. |
 
 ## Building
 

@@ -240,6 +240,34 @@
   .rt-actions button.update:hover { background: #ffcc4b; color: #0b1020; }
   .rt-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
 
+  /* Run history + run detail */
+  .runs-list {
+    display: flex; flex-direction: column; gap: 4px;
+    max-height: 200px; overflow-y: auto;
+    border: 1px solid var(--border); border-radius: 6px; padding: 4px;
+    background: var(--panel2);
+  }
+  .run-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 8px; border-radius: 4px; cursor: pointer;
+    font-size: 12px;
+  }
+  .run-row:hover { background: var(--panel); }
+  .run-row .status-pill {
+    font-size: 9px; padding: 2px 6px; border-radius: 999px;
+    text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600;
+    flex-shrink: 0;
+  }
+  .run-row .status-pill.queued    { background: rgba(138,147,166,0.15); color: var(--muted); }
+  .run-row .status-pill.running   { background: rgba(240,180,41,0.15);  color: #f0b429; animation: rt-pulse 1.4s infinite; }
+  .run-row .status-pill.succeeded { background: rgba(76,175,120,0.15);  color: #4caf78; }
+  .run-row .status-pill.failed    { background: rgba(255,113,113,0.15); color: #ff7171; }
+  .run-row .status-pill.cancelled { background: rgba(138,147,166,0.15); color: var(--muted); }
+  .run-row .id { font-family: ui-monospace, Menlo, Consolas, monospace; color: var(--muted); flex: 1; }
+  .run-row .when { color: var(--muted); }
+
+  .runs-empty { padding: 14px; color: var(--muted); font-size: 12px; text-align: center; }
+
   /* Type toggle inside member modal */
   .type-toggle { display: flex; gap: 6px; }
   .type-toggle button {
@@ -454,6 +482,12 @@
     <div id="m-runtimeActionsRow" style="display:none">
       <label>Runtime</label>
       <div class="rt-actions" id="m-runtimeActions"></div>
+    </div>
+    <div id="m-runsRow" style="display:none">
+      <label>Runs
+        <button type="button" id="m-runBtn" style="margin-left:8px;background:var(--accent);color:#0b1020;border:none;padding:4px 10px;border-radius:6px;font:inherit;font-size:11px;font-weight:600;cursor:pointer;text-transform:uppercase;letter-spacing:0.5px">▶ Run</button>
+      </label>
+      <div class="runs-list" id="m-runsList"></div>
     </div>
     <div id="m-activeRow" style="display:none;font-size:12px;color:var(--muted)">
       <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
@@ -988,16 +1022,127 @@ function openMemberModal(member = null) {
   document.getElementById("m-active").checked = member ? !!member.is_active : true;
   document.getElementById("m-activeRow").style.display = member ? "" : "none";
   document.getElementById("memDelete").style.display = member ? "" : "none";
-  // Snapshot panel + runtime actions: only visible when editing an existing AI agent member
+  // Snapshot panel + runtime actions + runs: only visible when editing an existing AI agent member
   const showSnap = !!member && member.type === "ai_agent";
   document.getElementById("m-snapshotRow").style.display = showSnap ? "" : "none";
   document.getElementById("m-runtimeActionsRow").style.display = showSnap ? "" : "none";
+  document.getElementById("m-runsRow").style.display = showSnap ? "" : "none";
   if (showSnap) {
     loadMemberSnapshot(member.id);
     renderRuntimeActions(member);
+    loadMemberRuns(member.id);
+    bindRunButton(member);
   }
   document.getElementById("memOverlay").classList.add("open");
   document.getElementById("m-name").focus();
+}
+
+// ---------- Agent runs ----------
+let _runsPollTimer = null;
+
+function bindRunButton(member) {
+  const btn = document.getElementById("m-runBtn");
+  btn.disabled = member.runtime_status !== "running";
+  btn.title = btn.disabled
+    ? "Start the container first to enable runs"
+    : "Invoke this agent with custom inputs";
+  btn.onclick = () => openRunPrompt(member);
+}
+
+function openRunPrompt(member) {
+  // Quick-and-dirty inputs form: a JSON textarea seeded from the agent's
+  // declared input schema. Auto-generated form per-field comes later.
+  const declared = (member.config?.agent_snapshot?.config?.agent?.inputs) || [];
+  const seed = {};
+  for (const inp of declared) seed[inp.name] = inp.default ?? "";
+  const raw = prompt(
+    "Inputs (JSON) for this agent run:\n\n" +
+    "Declared: " + (declared.map(d => d.name + (d.required ? "*" : "")).join(", ") || "(none)"),
+    JSON.stringify(seed, null, 2),
+  );
+  if (raw === null) return;
+  let inputs;
+  try { inputs = JSON.parse(raw); }
+  catch (e) { alert("Inputs must be valid JSON: " + e.message); return; }
+  triggerRun(member.id, inputs);
+}
+
+async function triggerRun(memberId, inputs) {
+  try {
+    const r = await fetch(`/api/team-members/${memberId}/runs`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ inputs }),
+    });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.status);
+    await loadMemberRuns(memberId);
+  } catch (e) { alert("run failed to start: " + e.message); }
+}
+
+async function loadMemberRuns(memberId) {
+  const list = document.getElementById("m-runsList");
+  try {
+    const runs = await fetch(`/api/team-members/${memberId}/runs?limit=20`)
+                       .then(r => r.json());
+    renderRunsList(memberId, runs);
+    // Poll while any are unfinished
+    if (_runsPollTimer) clearTimeout(_runsPollTimer);
+    if (runs.some(r => r.status === "queued" || r.status === "running")) {
+      _runsPollTimer = setTimeout(() => loadMemberRuns(memberId), 2000);
+    }
+  } catch (e) {
+    list.innerHTML = `<div class="runs-empty">could not load runs: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function renderRunsList(memberId, runs) {
+  const list = document.getElementById("m-runsList");
+  list.innerHTML = "";
+  if (!runs.length) {
+    list.innerHTML = `<div class="runs-empty">No runs yet. Click ▶ Run to invoke the agent.</div>`;
+    return;
+  }
+  runs.forEach(run => {
+    const row = document.createElement("div");
+    row.className = "run-row";
+    const when = run.completed_at || run.started_at || run.created_at || "";
+    const whenShort = when ? new Date(when).toLocaleTimeString() : "";
+    row.innerHTML = `
+      <span class="status-pill ${run.status}">${run.status}</span>
+      <span class="id">${escapeHtml(run.id.slice(0, 8))}</span>
+      <span class="when">${escapeHtml(whenShort)}</span>
+    `;
+    row.onclick = () => showRunDetail(run.id);
+    list.appendChild(row);
+  });
+}
+
+async function showRunDetail(runId) {
+  try {
+    const run = await fetch(`/api/agent-runs/${runId}`).then(r => r.json());
+    const lines = [
+      `Run: ${run.id}`,
+      `Status: ${run.status}`,
+      `Created: ${run.created_at}`,
+      run.started_at ? `Started: ${run.started_at}` : "",
+      run.completed_at ? `Completed: ${run.completed_at}` : "",
+      run.tokens_in != null ? `Tokens in: ${run.tokens_in}` : "",
+      run.tokens_out != null ? `Tokens out: ${run.tokens_out}` : "",
+      run.cost_usd != null ? `Cost: $${run.cost_usd.toFixed(4)}` : "",
+      "",
+      "Inputs:",
+      JSON.stringify(run.inputs, null, 2),
+      "",
+      run.output ? "Output:\n" + run.output : "",
+      run.error ? "Error:\n" + run.error : "",
+    ].filter(Boolean);
+    if (run.status === "queued" || run.status === "running") {
+      if (confirm(lines.join("\n") + "\n\n— Cancel this run?")) {
+        await fetch(`/api/agent-runs/${runId}/cancel`, { method: "POST" });
+      }
+    } else {
+      alert(lines.join("\n"));
+    }
+  } catch (e) { alert("could not load run: " + e.message); }
 }
 
 function renderRuntimeActions(member) {

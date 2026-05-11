@@ -48,8 +48,14 @@ class RuntimeAdapter(ABC):
         project_slug: str,
         snapshot: dict[str, Any],
         config: dict[str, Any],
+        secrets: Optional[dict[str, Any]] = None,
     ) -> ProvisionResult:
-        """Pull image, create + start a container holding `snapshot`."""
+        """Pull image, create + start a container holding `snapshot`.
+
+        `secrets` provides plaintext values (Anthropic key, callback token) that
+        the adapter is expected to surface to the container as env vars. The
+        caller is responsible for decrypting these before invocation.
+        """
 
     @abstractmethod
     async def stop(self, container_id: str) -> None:

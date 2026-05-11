@@ -8,13 +8,18 @@ import json
 import logging
 import os
 import re
+import secrets as secrets_lib
 import sqlite3
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
 
+import httpx
 import yaml
 
+from auth import decrypt as aes_decrypt
+from auth import encrypt as aes_encrypt
 from runtime_adapter import RuntimeAdapter
 
 log = logging.getLogger("starforge")
@@ -74,6 +79,10 @@ def init_projects_schema() -> None:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(projects)").fetchall()}
         if "runtime_config" not in cols:
             conn.execute("ALTER TABLE projects ADD COLUMN runtime_config TEXT NOT NULL DEFAULT '{}'")
+        if "runtime_secrets_enc" not in cols:
+            # AES-256-GCM ciphertext of a JSON dict containing:
+            # { "anthropic_api_key": "...", "callback_token": "..." }
+            conn.execute("ALTER TABLE projects ADD COLUMN runtime_secrets_enc BLOB")
 
 
 def ensure_default_project() -> int:
@@ -172,10 +181,35 @@ def init_team_members_schema() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_team_project ON team_members(project_id)")
 
 
+def init_agent_runs_schema() -> None:
+    with db() as conn:
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS agent_runs (
+                id TEXT PRIMARY KEY,                       -- UUID
+                member_id INTEGER NOT NULL REFERENCES team_members(id) ON DELETE CASCADE,
+                status TEXT NOT NULL DEFAULT 'queued'
+                    CHECK(status IN ('queued','running','succeeded','failed','cancelled')),
+                inputs TEXT NOT NULL DEFAULT '{}',
+                output TEXT,
+                error TEXT,
+                tokens_in INTEGER,
+                tokens_out INTEGER,
+                cost_usd REAL,
+                triggered_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                completed_at TEXT
+            )"""
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_runs_member ON agent_runs(member_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_runs_status ON agent_runs(status)")
+
+
 init_auth_schema()
 init_projects_schema()
 init_team_members_schema()
 init_tasks_schema()
+init_agent_runs_schema()
 
 
 # ---------- App settings (generic key/value, used for runtime intervals etc.) ----------
@@ -538,11 +572,20 @@ async def _provision_member(member_id: int, project_id: int) -> None:
                 runtime_error="no agent snapshot — bind member to an agent_type first",
             )
             return
+        # Decrypt project secrets and surface to the adapter so it can pass
+        # them to the container as env vars (Anthropic key, callback token).
+        proj_secrets = get_project_secrets(project["id"])
+        # Auto-create the callback token if it's missing — Phase C needs it for
+        # nemoclaw → Starforge result callbacks.
+        if not proj_secrets.get("callback_token"):
+            ensure_project_callback_token(project["id"])
+            proj_secrets = get_project_secrets(project["id"])
         result = await rt.provision(
             member_id=member_id,
             project_slug=project["slug"],
             snapshot=snapshot,
             config=rt_config,
+            secrets=proj_secrets,
         )
         _set_member_runtime_state(
             member_id,
@@ -893,6 +936,9 @@ def _project_with_count(conn, row) -> dict[str, Any]:
         d["runtime_config"] = json.loads(d.get("runtime_config") or "{}")
     except json.JSONDecodeError:
         d["runtime_config"] = {}
+    # Strip raw encrypted bytes — they're not JSON-encodable and shouldn't be
+    # exposed over the API anyway. Status is read via /runtime-secrets/status.
+    d.pop("runtime_secrets_enc", None)
     return d
 
 
@@ -982,11 +1028,59 @@ VALID_RUNTIME_TYPES = {"docker", "k8s"}
 VALID_PULL_POLICIES = {"if_not_present", "always", "never"}
 
 
+# ---------- Per-project runtime secrets (AES-256-GCM at rest) ----------
+
+def get_project_secrets(project_id: int) -> dict[str, Any]:
+    """Decrypted secrets dict for a project. Returns {} if unset/unreadable."""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT runtime_secrets_enc FROM projects WHERE id = ?", (project_id,)
+        ).fetchone()
+    blob = row["runtime_secrets_enc"] if row else None
+    if not blob:
+        return {}
+    try:
+        return json.loads(aes_decrypt(bytes(blob)))
+    except Exception:  # noqa: BLE001 — corrupt / wrong-key blob: treat as empty
+        return {}
+
+
+def set_project_secrets(project_id: int, **updates: Optional[str]) -> None:
+    """Merge updates into the project's secret dict and persist encrypted.
+    A None value clears that key."""
+    secrets = get_project_secrets(project_id)
+    for k, v in updates.items():
+        if v is None:
+            secrets.pop(k, None)
+        else:
+            secrets[k] = v
+    blob = aes_encrypt(json.dumps(secrets)) if secrets else None
+    with db() as conn:
+        conn.execute(
+            "UPDATE projects SET runtime_secrets_enc = ?, updated_at = ? WHERE id = ?",
+            (blob, now_iso(), project_id),
+        )
+
+
+def ensure_project_callback_token(project_id: int) -> str:
+    """Generate-on-demand callback token used to auth nemoclaw → Starforge results.
+
+    The token is created once on first need and stored encrypted; subsequent
+    calls return the existing value. Regeneration is an explicit admin action.
+    """
+    secrets = get_project_secrets(project_id)
+    if secrets.get("callback_token"):
+        return secrets["callback_token"]
+    token = secrets_lib.token_urlsafe(32)
+    set_project_secrets(project_id, callback_token=token)
+    return token
+
+
 class ProjectRuntimeConfig(BaseModel):
     """Project-level configuration for the agent runtime (Phase B/C).
 
-    Currently only the storage and validation paths are implemented — actual
-    container spawn happens in Phase B.2.
+    Sensitive fields (Anthropic API key, callback token) live in
+    runtime_secrets_enc (AES-encrypted), not here.
     """
     type: Optional[str] = None  # "docker" | "k8s" | None (= not configured)
     docker_host: str = Field(default="", max_length=500)
@@ -996,6 +1090,25 @@ class ProjectRuntimeConfig(BaseModel):
     cpu_limit: str = Field(default="1", max_length=50)
     memory_limit: str = Field(default="2Gi", max_length=50)
     extra_env: dict[str, str] = Field(default_factory=dict)
+    # URL that the nemoclaw container will POST results back to. Must be
+    # reachable from inside the container — e.g. http://host.docker.internal:8000
+    # for Docker Desktop, http://starforge:8000 for compose, etc.
+    starforge_callback_url: str = Field(default="", max_length=500)
+
+
+class ProjectRuntimeSecrets(BaseModel):
+    """Write-only payload for project runtime secrets.
+
+    Pass None to leave a field unchanged. Omit a field to leave it unchanged.
+    GET responses never echo these back.
+    """
+    anthropic_api_key: Optional[str] = Field(default=None, max_length=500)
+    callback_token: Optional[str] = Field(default=None, max_length=200)
+
+
+class ProjectRuntimeSecretsStatus(BaseModel):
+    anthropic_api_key_set: bool
+    callback_token_set: bool
 
 
 @app.get("/api/projects/{pid}/runtime-config")
@@ -1035,6 +1148,45 @@ async def set_project_runtime_config(
             (cfg_json, now_iso(), pid),
         )
     return body.model_dump()
+
+
+@app.get("/api/projects/{pid}/runtime-secrets/status")
+async def get_project_runtime_secrets_status(pid: int, _: dict = Depends(current_user)):
+    if not get_project_row(pid):
+        raise HTTPException(404, "project not found")
+    s = get_project_secrets(pid)
+    return {
+        "anthropic_api_key_set": bool(s.get("anthropic_api_key")),
+        "callback_token_set": bool(s.get("callback_token")),
+    }
+
+
+@app.put("/api/projects/{pid}/runtime-secrets")
+async def put_project_runtime_secrets(
+    pid: int, body: ProjectRuntimeSecrets, user: dict = Depends(current_user)
+):
+    project = get_project_row(pid)
+    if not project:
+        raise HTTPException(404, "project not found")
+    if not can_modify_project(user, project):
+        raise HTTPException(403, "only admin or project creator can set secrets")
+    data = body.model_dump(exclude_unset=True)
+    if not data:
+        raise HTTPException(400, "no fields to update")
+    set_project_secrets(pid, **data)
+    return await get_project_runtime_secrets_status(pid, user)
+
+
+@app.post("/api/projects/{pid}/runtime-secrets/regenerate-callback-token")
+async def regenerate_callback_token(pid: int, user: dict = Depends(current_user)):
+    project = get_project_row(pid)
+    if not project:
+        raise HTTPException(404, "project not found")
+    if not can_modify_project(user, project):
+        raise HTTPException(403, "only admin or project creator can regenerate the token")
+    new_token = secrets_lib.token_urlsafe(32)
+    set_project_secrets(pid, callback_token=new_token)
+    return {"ok": True, "callback_token_set": True}
 
 
 @app.delete("/api/projects/{pid}", status_code=204)
@@ -1370,9 +1522,12 @@ async def member_runtime_restart(
                 _set_member_runtime_state(mid, runtime_status="error",
                                            runtime_error="missing agent_snapshot")
             else:
+                proj = get_project_row(member["project_id"]) or {}
+                proj_secrets = get_project_secrets(proj.get("id", 0))
                 result = await rt.provision(
-                    member_id=mid, project_slug=(get_project_row(member["project_id"]) or {}).get("slug", ""),
+                    member_id=mid, project_slug=proj.get("slug", ""),
                     snapshot=snapshot, config={**rt_cfg, "image_pull_policy": "always"},
+                    secrets=proj_secrets,
                 )
                 _set_member_runtime_state(
                     mid,
@@ -1446,6 +1601,257 @@ async def check_all_image_updates() -> int:
         except Exception as e:  # noqa: BLE001
             log.warning("image update check failed for member %s: %s", r["id"], e)
     return n
+
+
+# ---------- Agent runs (Phase C.1: dispatch + callback) ----------
+
+# Tests inject a stand-in for the outbound HTTP call to nemoclaw so we don't
+# need a live container. The override is a callable matching the same
+# signature as _http_post_invoke.
+_invoke_http_override = None
+
+
+async def _http_post_invoke(
+    endpoint: str, payload: dict[str, Any], token: str
+) -> dict[str, Any]:
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        r = await client.post(f"{endpoint}/invoke", json=payload, headers=headers)
+        if r.status_code >= 400:
+            raise RuntimeError(f"nemoclaw rejected invoke: {r.status_code} {r.text[:200]}")
+        try:
+            return r.json()
+        except Exception:
+            return {}
+
+
+async def _dispatch_invoke(
+    endpoint: str, payload: dict[str, Any], token: str
+) -> dict[str, Any]:
+    if _invoke_http_override is not None:
+        return await _invoke_http_override(endpoint, payload, token)
+    return await _http_post_invoke(endpoint, payload, token)
+
+
+def _row_to_run(row) -> dict[str, Any]:
+    d = dict(row)
+    try:
+        d["inputs"] = json.loads(d.get("inputs") or "{}")
+    except json.JSONDecodeError:
+        d["inputs"] = {}
+    return d
+
+
+class RunCreate(BaseModel):
+    inputs: dict[str, Any] = Field(default_factory=dict)
+
+
+class RunResult(BaseModel):
+    """Callback payload from nemoclaw when a run finishes."""
+    status: str  # "succeeded" | "failed"
+    output: Optional[str] = None
+    error: Optional[str] = None
+    tokens_in: Optional[int] = None
+    tokens_out: Optional[int] = None
+    cost_usd: Optional[float] = None
+
+
+@app.post("/api/team-members/{mid}/runs", status_code=201)
+async def create_agent_run(
+    mid: int, body: RunCreate, user: dict = Depends(current_user)
+):
+    """Create a queued run and dispatch it to the member's nemoclaw container."""
+    with db() as conn:
+        row = conn.execute("SELECT * FROM team_members WHERE id = ?", (mid,)).fetchone()
+    if not row:
+        raise HTTPException(404, "team member not found")
+    member = _row_to_member(row)
+    if member["type"] != "ai_agent":
+        raise HTTPException(400, "only ai_agent members can be invoked")
+    if not member.get("runtime_container_id") or not member.get("runtime_endpoint"):
+        raise HTTPException(400, "member has no running container — start it first")
+    if member.get("runtime_status") != "running":
+        raise HTTPException(400, f"container not running (status: {member.get('runtime_status')})")
+
+    project = get_project_row(member["project_id"])
+    if not project:
+        raise HTTPException(500, "member's project disappeared")
+    try:
+        rt_cfg = json.loads(project.get("runtime_config") or "{}")
+    except json.JSONDecodeError:
+        rt_cfg = {}
+    callback_url = rt_cfg.get("starforge_callback_url", "")
+    if not callback_url:
+        raise HTTPException(
+            400,
+            "project's starforge_callback_url isn't set — nemoclaw needs it "
+            "to report results back. Configure it in the project's runtime settings.",
+        )
+    callback_token = ensure_project_callback_token(project["id"])
+
+    run_id = str(uuid.uuid4())
+    ts = now_iso()
+    with db() as conn:
+        conn.execute(
+            """INSERT INTO agent_runs
+               (id, member_id, status, inputs, triggered_by, created_at)
+               VALUES (?, ?, 'queued', ?, ?, ?)""",
+            (run_id, mid, json.dumps(body.inputs), user["id"], ts),
+        )
+
+    # Dispatch (fire-and-forget; we update status as we go).
+    asyncio.create_task(
+        _dispatch_run(
+            run_id=run_id,
+            member_endpoint=member["runtime_endpoint"],
+            callback_url=callback_url,
+            callback_token=callback_token,
+            inputs=body.inputs,
+            snapshot=(member.get("config") or {}).get("agent_snapshot") or {},
+        )
+    )
+
+    with db() as conn:
+        row = conn.execute("SELECT * FROM agent_runs WHERE id = ?", (run_id,)).fetchone()
+    return _row_to_run(row)
+
+
+async def _dispatch_run(
+    *,
+    run_id: str,
+    member_endpoint: str,
+    callback_url: str,
+    callback_token: str,
+    inputs: dict[str, Any],
+    snapshot: dict[str, Any],
+) -> None:
+    """Send the invoke request to nemoclaw and flip the run row to 'running'.
+    Failures here flip to 'failed' immediately so the UI doesn't spin forever."""
+    payload = {
+        "run_id": run_id,
+        "callback_url": callback_url.rstrip("/"),
+        "callback_token": callback_token,
+        "inputs": inputs,
+        "snapshot": snapshot,
+    }
+    try:
+        await _dispatch_invoke(member_endpoint, payload, callback_token)
+    except Exception as e:  # noqa: BLE001
+        with db() as conn:
+            conn.execute(
+                """UPDATE agent_runs SET status='failed', error=?, completed_at=? WHERE id=?""",
+                (f"dispatch failed: {e}", now_iso(), run_id),
+            )
+        return
+    with db() as conn:
+        conn.execute(
+            "UPDATE agent_runs SET status='running', started_at=? WHERE id=? AND status='queued'",
+            (now_iso(), run_id),
+        )
+
+
+@app.get("/api/team-members/{mid}/runs")
+async def list_member_runs(
+    mid: int, limit: int = 50, _: dict = Depends(current_user)
+):
+    limit = max(1, min(limit, 200))
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM agent_runs WHERE member_id = ? ORDER BY created_at DESC LIMIT ?",
+            (mid, limit),
+        ).fetchall()
+    return [_row_to_run(r) for r in rows]
+
+
+@app.get("/api/agent-runs/{run_id}")
+async def get_agent_run(run_id: str, _: dict = Depends(current_user)):
+    with db() as conn:
+        row = conn.execute("SELECT * FROM agent_runs WHERE id = ?", (run_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "run not found")
+    return _row_to_run(row)
+
+
+@app.post("/api/agent-runs/{run_id}/cancel")
+async def cancel_agent_run(run_id: str, _: dict = Depends(current_user)):
+    with db() as conn:
+        row = conn.execute("SELECT * FROM agent_runs WHERE id = ?", (run_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "run not found")
+    run = _row_to_run(row)
+    if run["status"] in {"succeeded", "failed", "cancelled"}:
+        return run  # nothing to do
+    # Best-effort: tell nemoclaw to stop. We mark cancelled regardless so the
+    # callback (if it lands later) becomes a no-op.
+    member_row = None
+    with db() as conn:
+        member_row = conn.execute("SELECT * FROM team_members WHERE id = ?", (run["member_id"],)).fetchone()
+        conn.execute(
+            "UPDATE agent_runs SET status='cancelled', completed_at=? WHERE id=?",
+            (now_iso(), run_id),
+        )
+    if member_row and member_row["runtime_endpoint"]:
+        try:
+            project = get_project_row(member_row["project_id"]) or {}
+            token = (get_project_secrets(project.get("id", 0)) or {}).get("callback_token", "")
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                await client.delete(
+                    f"{member_row['runtime_endpoint']}/runs/{run_id}",
+                    headers={"Authorization": f"Bearer {token}"} if token else {},
+                )
+        except Exception as e:  # noqa: BLE001
+            log.info("cancel: best-effort DELETE failed for %s: %s", run_id, e)
+    with db() as conn:
+        row = conn.execute("SELECT * FROM agent_runs WHERE id = ?", (run_id,)).fetchone()
+    return _row_to_run(row)
+
+
+@app.post("/api/agent-runs/{run_id}/result")
+async def post_agent_run_result(run_id: str, body: RunResult, request: Request):
+    """Callback endpoint nemoclaw POSTs to when a run finishes.
+
+    Authenticated by Bearer token matching the run's project's callback_token —
+    NOT by the user session, since nemoclaw isn't a user.
+    """
+    # Look up the run (need member → project for token validation)
+    with db() as conn:
+        row = conn.execute(
+            """SELECT r.*, m.project_id AS project_id
+               FROM agent_runs r JOIN team_members m ON m.id = r.member_id
+               WHERE r.id = ?""",
+            (run_id,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "run not found")
+    if row["status"] in {"succeeded", "failed", "cancelled"}:
+        # Idempotent: late callback after a terminal state is a no-op.
+        return {"ok": True, "ignored": True}
+
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "missing bearer token")
+    presented = auth[len("Bearer "):]
+    expected = (get_project_secrets(row["project_id"]) or {}).get("callback_token")
+    if not expected or not secrets_lib.compare_digest(presented, expected):
+        raise HTTPException(401, "invalid callback token")
+
+    if body.status not in {"succeeded", "failed"}:
+        raise HTTPException(400, "status must be 'succeeded' or 'failed'")
+
+    with db() as conn:
+        conn.execute(
+            """UPDATE agent_runs SET
+                   status = ?, output = ?, error = ?,
+                   tokens_in = ?, tokens_out = ?, cost_usd = ?,
+                   completed_at = ?
+               WHERE id = ?""",
+            (
+                body.status, body.output, body.error,
+                body.tokens_in, body.tokens_out, body.cost_usd,
+                now_iso(), run_id,
+            ),
+        )
+    return {"ok": True}
 
 
 async def _image_update_loop() -> None:

@@ -1,24 +1,37 @@
-"""Stub nemoclaw runtime.
+"""Nemoclaw runtime — one container per Starforge AI-agent team member.
 
-A long-lived container that's intended to host one AI-agent team member from
-Starforge. It receives an agent snapshot at startup (env var or mounted file),
-exposes /healthz so the orchestrator can wait for readiness, and stubs out
-/invoke until Phase C wires up the actual LLM dispatch.
+Phase C.1: real Claude invocation. No tools, no guardrails enforcement yet —
+those land in C.2 / C.3. The container holds the agent snapshot at startup,
+accepts /invoke calls, runs Claude in a background task, and POSTs results
+back to Starforge via callback.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
 import sys
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from fastapi import FastAPI
+import httpx
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Header
+from pydantic import BaseModel
+
+# ---------- Snapshot bootstrap (env or mounted file) ----------
 
 SNAPSHOT_ENV = "AGENT_SNAPSHOT_JSON"
 SNAPSHOT_FILE_ENV = "AGENT_SNAPSHOT_FILE"
 DEFAULT_SNAPSHOT_PATH = "/run/agent-snapshot.json"
+
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+STARFORGE_CALLBACK_TOKEN = os.environ.get("STARFORGE_CALLBACK_TOKEN", "")
+STARFORGE_CALLBACK_URL_FALLBACK = os.environ.get("STARFORGE_CALLBACK_URL", "")
+
+logging.basicConfig(level=logging.INFO, format="[nemoclaw] %(message)s")
+log = logging.getLogger("nemoclaw")
 
 
 def _load_snapshot() -> Optional[dict[str, Any]]:
@@ -27,7 +40,7 @@ def _load_snapshot() -> Optional[dict[str, Any]]:
         try:
             return json.loads(raw)
         except json.JSONDecodeError as e:
-            print(f"[nemoclaw] {SNAPSHOT_ENV} is not valid JSON: {e}", file=sys.stderr)
+            log.error("%s is not valid JSON: %s", SNAPSHOT_ENV, e)
             return None
     path = os.environ.get(SNAPSHOT_FILE_ENV, DEFAULT_SNAPSHOT_PATH)
     if os.path.exists(path):
@@ -35,7 +48,7 @@ def _load_snapshot() -> Optional[dict[str, Any]]:
             with open(path, encoding="utf-8") as f:
                 return json.load(f)
         except (OSError, json.JSONDecodeError) as e:
-            print(f"[nemoclaw] could not read {path}: {e}", file=sys.stderr)
+            log.error("could not read %s: %s", path, e)
             return None
     return None
 
@@ -46,15 +59,36 @@ LOADED_AT = datetime.now(timezone.utc).isoformat()
 if SNAPSHOT:
     _name = (SNAPSHOT.get("config") or {}).get("agent", {}).get("name", "unknown")
     _type = SNAPSHOT.get("agent_type", "?")
-    print(f"[nemoclaw] loaded agent name={_name!r} type={_type!r}", file=sys.stderr)
+    log.info("loaded agent name=%r type=%r", _name, _type)
 else:
-    print(
-        f"[nemoclaw] WARNING: no snapshot loaded. Set {SNAPSHOT_ENV} or mount "
-        f"a file at {DEFAULT_SNAPSHOT_PATH} (override with {SNAPSHOT_FILE_ENV}).",
-        file=sys.stderr,
-    )
+    log.warning("no snapshot loaded; /invoke will fail until one is provided")
 
-app = FastAPI(title="nemoclaw (stub)", version="0.1.0")
+# ---------- App ----------
+
+app = FastAPI(title="nemoclaw", version="0.2.0")
+
+# Track in-flight runs so /runs/{id} cancellation can interrupt them
+_active_runs: dict[str, asyncio.Task] = {}
+
+
+def _check_callback_token(authorization: Optional[str]) -> None:
+    """Reject invocations not bearing the shared per-project token."""
+    if not STARFORGE_CALLBACK_TOKEN:
+        # No token configured → accept any caller. Acceptable for fully-private
+        # docker networks; not safe if the container is reachable elsewhere.
+        return
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(401, "missing bearer token")
+    if authorization[len("Bearer "):] != STARFORGE_CALLBACK_TOKEN:
+        raise HTTPException(401, "bad bearer token")
+
+
+class InvokeRequest(BaseModel):
+    run_id: str
+    callback_url: Optional[str] = None
+    callback_token: Optional[str] = None
+    inputs: dict[str, Any] = {}
+    snapshot: dict[str, Any] = {}  # not used yet; lets per-run overrides land later
 
 
 @app.get("/healthz")
@@ -64,6 +98,7 @@ def healthz() -> dict[str, Any]:
         "loaded_at": LOADED_AT,
         "has_snapshot": SNAPSHOT is not None,
         "agent_type": (SNAPSHOT or {}).get("agent_type"),
+        "anthropic_key_present": bool(ANTHROPIC_API_KEY),
     }
 
 
@@ -74,9 +109,120 @@ def get_agent() -> dict[str, Any]:
     return SNAPSHOT
 
 
-@app.post("/invoke")
-def invoke() -> dict[str, Any]:
-    return {
-        "ok": False,
-        "reason": "invocation not yet implemented in this stub — Phase C work",
-    }
+@app.post("/invoke", status_code=202)
+async def invoke(
+    body: InvokeRequest,
+    background: BackgroundTasks,
+    authorization: Optional[str] = Header(default=None),
+) -> dict[str, Any]:
+    _check_callback_token(authorization)
+    if SNAPSHOT is None:
+        raise HTTPException(400, "no agent snapshot — container started without one")
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(400, "ANTHROPIC_API_KEY not configured on this container")
+
+    callback_url = body.callback_url or STARFORGE_CALLBACK_URL_FALLBACK
+    callback_token = body.callback_token or STARFORGE_CALLBACK_TOKEN
+    if not callback_url:
+        raise HTTPException(400, "no callback_url provided")
+
+    task = asyncio.create_task(_run_agent(
+        run_id=body.run_id,
+        inputs=body.inputs,
+        callback_url=callback_url,
+        callback_token=callback_token,
+    ))
+    _active_runs[body.run_id] = task
+    return {"ok": True, "run_id": body.run_id, "status": "running"}
+
+
+@app.delete("/runs/{run_id}", status_code=200)
+async def cancel_run(
+    run_id: str,
+    authorization: Optional[str] = Header(default=None),
+) -> dict[str, Any]:
+    _check_callback_token(authorization)
+    task = _active_runs.get(run_id)
+    if not task or task.done():
+        return {"ok": True, "already_finished": True}
+    task.cancel()
+    return {"ok": True}
+
+
+# ---------- Claude invocation ----------
+
+async def _run_agent(
+    *, run_id: str, inputs: dict[str, Any],
+    callback_url: str, callback_token: str,
+) -> None:
+    """Background task: build messages from snapshot + inputs, call Claude,
+    POST result back to Starforge."""
+    try:
+        # Lazy import so /healthz works even if anthropic SDK fails to import
+        import anthropic  # type: ignore
+
+        agent_block = (SNAPSHOT or {}).get("config", {}).get("agent", {}) or {}
+        system_prompt = (SNAPSHOT or {}).get("system_prompt", "") or agent_block.get("system_prompt", "") or ""
+        if isinstance(system_prompt, dict):
+            # Shouldn't happen post-resolver, but be defensive
+            system_prompt = json.dumps(system_prompt)
+        model = agent_block.get("model", "claude-sonnet-4-6")
+
+        # For C.1 we frame the run as a single user turn containing the inputs.
+        # The system prompt instructs the agent how to handle them.
+        user_content = json.dumps(inputs, indent=2)
+
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        resp = await asyncio.to_thread(
+            client.messages.create,
+            model=model,
+            max_tokens=4096,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_content}],
+        )
+
+        # Extract the text content from the response
+        text_parts: list[str] = []
+        for block in resp.content:
+            if getattr(block, "type", None) == "text":
+                text_parts.append(getattr(block, "text", ""))
+        output = "\n".join(text_parts).strip()
+
+        usage = getattr(resp, "usage", None)
+        tokens_in = getattr(usage, "input_tokens", None) if usage else None
+        tokens_out = getattr(usage, "output_tokens", None) if usage else None
+
+        result: dict[str, Any] = {
+            "status": "succeeded",
+            "output": output,
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+        }
+    except asyncio.CancelledError:
+        result = {"status": "failed", "error": "cancelled"}
+    except Exception as e:  # noqa: BLE001
+        log.exception("run %s failed", run_id)
+        result = {"status": "failed", "error": str(e)}
+
+    # Callback to Starforge with the result. Best-effort retry once.
+    headers = {"Authorization": f"Bearer {callback_token}"} if callback_token else {}
+    url = f"{callback_url.rstrip('/')}/api/agent-runs/{run_id}/result"
+    for attempt in (1, 2):
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                r = await client.post(url, json=result, headers=headers)
+            if r.status_code < 400:
+                break
+            log.warning("callback returned %s; attempt %s body=%s", r.status_code, attempt, r.text[:200])
+        except Exception as e:  # noqa: BLE001
+            log.warning("callback attempt %s failed: %s", attempt, e)
+        await asyncio.sleep(1.0)
+
+    _active_runs.pop(run_id, None)
+
+
+if __name__ == "__main__":
+    # Useful when running bare-metal for testing; the Docker image uses uvicorn
+    # via the CMD line.
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8080)  # noqa: S104

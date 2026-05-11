@@ -174,8 +174,40 @@
               <input id="rt-mem" placeholder="2Gi" />
             </div>
             <div class="full">
+              <label>Starforge callback URL</label>
+              <input id="rt-callback" placeholder="http://host.docker.internal:8000 (Docker Desktop) or http://starforge:8000 (compose)" />
+              <div style="font-size:11px;color:var(--muted);margin-top:4px;line-height:1.4">
+                The URL nemoclaw will POST results back to. Must be reachable
+                <em>from inside the container</em>. Required for /invoke (Phase C).
+              </div>
+            </div>
+            <div class="full">
               <label>Extra env (JSON object)</label>
               <textarea id="rt-env" placeholder='{"LOG_LEVEL":"debug"}' style="font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;min-height:60px"></textarea>
+            </div>
+          </div>
+
+          <div style="margin-top:14px;border-top:1px solid var(--border);padding-top:12px">
+            <div style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:10px">
+              Runtime Secrets (AES-256-GCM at rest)
+            </div>
+            <div class="form-grid">
+              <div class="full">
+                <label>Anthropic API key
+                  <span id="rt-secret-anthropic-status" style="font-size:11px;color:var(--muted);text-transform:none;letter-spacing:normal;margin-left:8px"></span>
+                </label>
+                <input id="rt-secret-anthropic" type="password" autocomplete="new-password" placeholder="sk-ant-... (leave blank to keep existing)" />
+              </div>
+              <div class="full" style="display:flex;align-items:center;gap:10px;font-size:12px;color:var(--muted)">
+                <span id="rt-callback-token-status">Callback token: —</span>
+                <button id="rt-regen-token" type="button" style="background:var(--panel2);color:var(--text);border:1px solid var(--border);padding:4px 10px;border-radius:6px;font:inherit;font-size:11px;cursor:pointer">Regenerate</button>
+              </div>
+            </div>
+            <div style="font-size:11px;color:var(--muted);margin-top:8px;line-height:1.5">
+              The callback token is auto-generated and passed to each nemoclaw
+              container as <code>STARFORGE_CALLBACK_TOKEN</code>. The Anthropic
+              key is passed as <code>ANTHROPIC_API_KEY</code>. Both are stored
+              encrypted; neither is ever returned in API responses.
             </div>
           </div>
         </div>
@@ -282,10 +314,30 @@ async function openEdit(id) {
   $("rt-network").value = rc.network || "";
   $("rt-cpu").value = rc.cpu_limit || "";
   $("rt-mem").value = rc.memory_limit || "";
+  $("rt-callback").value = rc.starforge_callback_url || "";
   $("rt-env").value = rc.extra_env ? JSON.stringify(rc.extra_env, null, 2) : "";
+
+  // Secrets status (write-only — we only show whether they're set)
+  const ss = await api(`/api/projects/${id}/runtime-secrets/status`) || {};
+  $("rt-secret-anthropic").value = "";
+  $("rt-secret-anthropic-status").textContent =
+    ss.anthropic_api_key_set ? "(set — leave blank to keep)" : "(not set)";
+  $("rt-callback-token-status").textContent =
+    ss.callback_token_set ? "Callback token: set ✓" : "Callback token: not set yet (auto-generated on first container spawn)";
 
   $("ov").classList.add("open"); $("f-name").focus();
 }
+
+// Regenerate callback token (only meaningful for an existing project)
+document.getElementById("rt-regen-token").onclick = async () => {
+  if (!editingId) { toast("Save the project first", "err"); return; }
+  if (!confirm("Regenerate the callback token? Running containers will need to be restarted to pick up the new value.")) return;
+  try {
+    await api(`/api/projects/${editingId}/runtime-secrets/regenerate-callback-token`, { method: "POST" });
+    toast("Token regenerated — restart containers to apply");
+    $("rt-callback-token-status").textContent = "Callback token: set ✓";
+  } catch (e) { toast(e.message, "err"); }
+};
 
 function closeModal() { $("ov").classList.remove("open"); editingId = null; }
 $("cancelBtn").onclick = closeModal;
@@ -322,11 +374,19 @@ $("saveBtn").onclick = async () => {
         network: $("rt-network").value.trim(),
         cpu_limit: $("rt-cpu").value.trim() || "1",
         memory_limit: $("rt-mem").value.trim() || "2Gi",
+        starforge_callback_url: $("rt-callback").value.trim(),
         extra_env: envObj,
       };
       await api(`/api/projects/${editingId}/runtime-config`, {
         method: "PUT", body: JSON.stringify(rtPayload),
       });
+      // Anthropic API key — only update if a non-empty value was typed
+      const apiKey = $("rt-secret-anthropic").value;
+      if (apiKey.trim()) {
+        await api(`/api/projects/${editingId}/runtime-secrets`, {
+          method: "PUT", body: JSON.stringify({ anthropic_api_key: apiKey }),
+        });
+      }
     } else {
       await api("/api/projects", { method:"POST", body: JSON.stringify(payload) });
     }

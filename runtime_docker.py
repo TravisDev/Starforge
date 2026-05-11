@@ -63,6 +63,7 @@ class DockerRuntime(RuntimeAdapter):
         project_slug: str,
         snapshot: dict[str, Any],
         config: dict[str, Any],
+        secrets: Optional[dict[str, Any]] = None,
     ) -> ProvisionResult:
         image = config.get("image")
         if not image:
@@ -93,6 +94,15 @@ class DockerRuntime(RuntimeAdapter):
 
         # Compose run kwargs
         env = {"AGENT_SNAPSHOT_JSON": json.dumps(snapshot)}
+        # Secrets → env (Anthropic key, callback token)
+        if secrets:
+            if secrets.get("anthropic_api_key"):
+                env["ANTHROPIC_API_KEY"] = secrets["anthropic_api_key"]
+            if secrets.get("callback_token"):
+                env["STARFORGE_CALLBACK_TOKEN"] = secrets["callback_token"]
+        # Non-secret runtime knobs the container needs
+        if config.get("starforge_callback_url"):
+            env["STARFORGE_CALLBACK_URL"] = config["starforge_callback_url"]
         env.update(config.get("extra_env") or {})
 
         kwargs: dict[str, Any] = dict(

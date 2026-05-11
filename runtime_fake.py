@@ -42,6 +42,7 @@ class FakeRuntime(RuntimeAdapter):
         project_slug: str,
         snapshot: dict[str, Any],
         config: dict[str, Any],
+        secrets: Optional[dict[str, Any]] = None,
     ) -> ProvisionResult:
         self.calls.append(("provision", member_id))
         image = config.get("image", "unknown:latest")
@@ -56,6 +57,8 @@ class FakeRuntime(RuntimeAdapter):
             "endpoint": f"http://fake-{project_slug}-member-{member_id}:8080",
             "started_at": datetime.now(timezone.utc).isoformat(),
             "snapshot_agent_type": snapshot.get("agent_type"),
+            # Record env vars derived from secrets so tests can assert on them
+            "secrets_seen": dict(secrets or {}),
         }
         return ProvisionResult(
             container_id=cid,
