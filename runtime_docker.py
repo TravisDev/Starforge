@@ -107,7 +107,10 @@ class DockerRuntime(RuntimeAdapter):
             pass
 
         # Compose run kwargs
-        env = {"AGENT_SNAPSHOT_JSON": json.dumps(snapshot)}
+        env = {
+            "AGENT_SNAPSHOT_JSON": json.dumps(snapshot),
+            "STARFORGE_MEMBER_ID": str(member_id),
+        }
         # Secrets → env (Anthropic key, callback token)
         if secrets:
             if secrets.get("anthropic_api_key"):

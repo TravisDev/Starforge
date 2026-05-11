@@ -181,6 +181,21 @@ def init_team_members_schema() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_team_project ON team_members(project_id)")
 
 
+def init_task_comments_schema() -> None:
+    with db() as conn:
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS task_comments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                author_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                author_member_id INTEGER REFERENCES team_members(id) ON DELETE SET NULL,
+                body TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )"""
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_task_comments_task ON task_comments(task_id)")
+
+
 def init_agent_runs_schema() -> None:
     with db() as conn:
         conn.execute(
@@ -209,6 +224,7 @@ init_auth_schema()
 init_projects_schema()
 init_team_members_schema()
 init_tasks_schema()
+init_task_comments_schema()
 init_agent_runs_schema()
 
 
@@ -1716,6 +1732,81 @@ async def create_agent_run(
     return _row_to_run(row)
 
 
+async def _maybe_trigger_agent_for_task(task: dict[str, Any]) -> None:
+    """If `task` was just (re)assigned to a running AI agent, auto-create a run
+    for that agent with the task as input. Idempotent — won't fire if there's
+    already an in-flight run for the same task+member."""
+    assignee_id = task.get("assignee_id")
+    if not assignee_id:
+        return
+    with db() as conn:
+        member_row = conn.execute(
+            "SELECT * FROM team_members WHERE id = ?", (assignee_id,)
+        ).fetchone()
+    if not member_row:
+        return
+    member = _row_to_member(member_row)
+    if member["type"] != "ai_agent":
+        return
+    if member.get("runtime_status") != "running":
+        # Could auto-start here; for v1, require the operator to start the agent first.
+        log.info("task %s assigned to non-running agent %s — skipping auto-trigger",
+                 task.get("id"), member["id"])
+        return
+    if not member.get("runtime_endpoint"):
+        return
+    project = get_project_row(member["project_id"])
+    if not project:
+        return
+    try:
+        rt_cfg = json.loads(project.get("runtime_config") or "{}")
+    except json.JSONDecodeError:
+        return
+    callback_url = rt_cfg.get("starforge_callback_url", "")
+    if not callback_url:
+        log.info("project has no starforge_callback_url — skipping auto-trigger")
+        return
+
+    # Idempotency: skip if this member already has a queued/running run for this task
+    with db() as conn:
+        existing = conn.execute(
+            """SELECT id FROM agent_runs
+               WHERE member_id = ? AND status IN ('queued','running')
+                 AND json_extract(inputs, '$.task_id') = ?""",
+            (member["id"], task["id"]),
+        ).fetchone()
+    if existing:
+        log.info("task %s already has an in-flight run for member %s — skipping",
+                 task["id"], member["id"])
+        return
+
+    callback_token = ensure_project_callback_token(project["id"])
+    run_id = str(uuid.uuid4())
+    inputs = {
+        "task_id": task["id"],
+        "task_title": task.get("title", ""),
+        "task_description": task.get("description", "") or "",
+        "task_status": task.get("status", ""),
+    }
+    with db() as conn:
+        conn.execute(
+            """INSERT INTO agent_runs (id, member_id, status, inputs, triggered_by, created_at)
+               VALUES (?, ?, 'queued', ?, NULL, ?)""",
+            (run_id, member["id"], json.dumps(inputs), now_iso()),
+        )
+    asyncio.create_task(
+        _dispatch_run(
+            run_id=run_id,
+            member_endpoint=member["runtime_endpoint"],
+            callback_url=callback_url,
+            callback_token=callback_token,
+            inputs=inputs,
+            snapshot=(member.get("config") or {}).get("agent_snapshot") or {},
+        )
+    )
+    log.info("auto-triggered run %s for member %s on task %s", run_id, member["id"], task["id"])
+
+
 async def _dispatch_run(
     *,
     run_id: str,
@@ -1965,7 +2056,11 @@ async def create_task(task: TaskCreate, user: dict = Depends(current_user)):
              json.dumps(task.metadata), ts, ts, user["id"], task.project_id),
         )
         row = conn.execute("SELECT * FROM tasks WHERE id = ?", (cur.lastrowid,)).fetchone()
-    return row_to_task(row, _fetch_member_for(task.assignee_id))
+    out = row_to_task(row, _fetch_member_for(task.assignee_id))
+    # Auto-trigger: if the task was assigned to a running AI agent at create, fire a run.
+    if task.assignee_id:
+        asyncio.create_task(_maybe_trigger_agent_for_task(out))
+    return out
 
 
 @app.get("/tasks/{task_id}")
@@ -2021,7 +2116,15 @@ async def update_task(task_id: int, patch: TaskUpdate, _: dict = Depends(current
     with db() as conn:
         conn.execute(f"UPDATE tasks SET {', '.join(fields)} WHERE id = ?", params)
         row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
-    return row_to_task(row, _fetch_member_for(row["assignee_id"]))
+    out = row_to_task(row, _fetch_member_for(row["assignee_id"]))
+    # Auto-trigger if the assignee_id just changed to a running AI agent
+    if (
+        "assignee_id" in data
+        and data["assignee_id"]
+        and data["assignee_id"] != existing["assignee_id"]
+    ):
+        asyncio.create_task(_maybe_trigger_agent_for_task(out))
+    return out
 
 
 @app.delete("/tasks/{task_id}", status_code=204)
@@ -2030,6 +2133,147 @@ async def delete_task(task_id: int, _: dict = Depends(current_user)):
         cur = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
         if cur.rowcount == 0:
             raise HTTPException(404, "task not found")
+
+
+# ---------- Task comments (humans + AI agents both write here) ----------
+
+class CommentCreate(BaseModel):
+    body: str = Field(min_length=1, max_length=8000)
+
+
+def _row_to_comment(row) -> dict[str, Any]:
+    return dict(row)
+
+
+def _hydrate_comments(rows: list) -> list[dict[str, Any]]:
+    """Attach author display info: name + (email or agent_type) + is_agent."""
+    out = []
+    with db() as conn:
+        for r in rows:
+            d = dict(r)
+            if d.get("author_user_id"):
+                u = conn.execute(
+                    "SELECT email, display_name FROM users WHERE id = ?",
+                    (d["author_user_id"],),
+                ).fetchone()
+                if u:
+                    d["author_name"] = u["display_name"] or u["email"]
+                    d["author_kind"] = "user"
+            if d.get("author_member_id"):
+                m = conn.execute(
+                    "SELECT name, agent_type FROM team_members WHERE id = ?",
+                    (d["author_member_id"],),
+                ).fetchone()
+                if m:
+                    d["author_name"] = m["name"]
+                    d["author_kind"] = "agent"
+                    d["author_agent_type"] = m["agent_type"]
+            out.append(d)
+    return out
+
+
+@app.get("/api/tasks/{task_id}/comments")
+async def list_task_comments(task_id: int, _: dict = Depends(current_user)):
+    with db() as conn:
+        if not conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone():
+            raise HTTPException(404, "task not found")
+        rows = conn.execute(
+            "SELECT * FROM task_comments WHERE task_id = ? ORDER BY created_at ASC",
+            (task_id,),
+        ).fetchall()
+    return _hydrate_comments(rows)
+
+
+@app.post("/api/tasks/{task_id}/comments", status_code=201)
+async def create_task_comment(
+    task_id: int, body: CommentCreate, user: dict = Depends(current_user)
+):
+    with db() as conn:
+        if not conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone():
+            raise HTTPException(404, "task not found")
+        cur = conn.execute(
+            """INSERT INTO task_comments
+                   (task_id, author_user_id, body, created_at)
+                   VALUES (?, ?, ?, ?)""",
+            (task_id, user["id"], body.body, now_iso()),
+        )
+        row = conn.execute("SELECT * FROM task_comments WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return _hydrate_comments([row])[0]
+
+
+# ---------- Agent task actions (status + comment, authed by callback token) ----------
+
+class AgentTaskAction(BaseModel):
+    """One action an agent wants to perform on a task."""
+    type: str  # "set_status" | "comment"
+    status: Optional[str] = None  # for set_status
+    body: Optional[str] = None    # for comment
+
+
+class AgentTaskActionsRequest(BaseModel):
+    agent_member_id: int
+    task_id: int
+    actions: list[AgentTaskAction]
+
+
+@app.post("/api/agents/task-actions")
+async def agent_task_actions(body: AgentTaskActionsRequest, request: Request):
+    """Endpoint nemoclaw calls to update a task or post a comment as the agent.
+    Authenticated by Bearer token == the project's callback_token. The agent
+    can only act on tasks within the project that issued the token."""
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "missing bearer token")
+    presented = auth[len("Bearer "):]
+
+    # Resolve member → project
+    with db() as conn:
+        member = conn.execute(
+            "SELECT * FROM team_members WHERE id = ?", (body.agent_member_id,)
+        ).fetchone()
+    if not member:
+        raise HTTPException(404, "agent member not found")
+    member_dict = _row_to_member(member)
+    if member_dict["type"] != "ai_agent":
+        raise HTTPException(400, "agent_member_id must refer to an ai_agent member")
+
+    expected = (get_project_secrets(member_dict["project_id"]) or {}).get("callback_token")
+    if not expected or not secrets_lib.compare_digest(presented, expected):
+        raise HTTPException(401, "invalid callback token")
+
+    # Verify task belongs to the same project
+    with db() as conn:
+        task = conn.execute("SELECT * FROM tasks WHERE id = ?", (body.task_id,)).fetchone()
+    if not task:
+        raise HTTPException(404, "task not found")
+    if task["project_id"] != member_dict["project_id"]:
+        raise HTTPException(403, "agent can only act on tasks in its own project")
+
+    results = []
+    for action in body.actions:
+        if action.type == "set_status":
+            if action.status not in VALID_STATUSES:
+                raise HTTPException(400, f"invalid status: {action.status}")
+            with db() as conn:
+                conn.execute(
+                    "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
+                    (action.status, now_iso(), body.task_id),
+                )
+            results.append({"type": "set_status", "ok": True, "status": action.status})
+        elif action.type == "comment":
+            if not action.body or not action.body.strip():
+                raise HTTPException(400, "comment body required")
+            with db() as conn:
+                conn.execute(
+                    """INSERT INTO task_comments
+                           (task_id, author_member_id, body, created_at)
+                           VALUES (?, ?, ?, ?)""",
+                    (body.task_id, body.agent_member_id, action.body, now_iso()),
+                )
+            results.append({"type": "comment", "ok": True})
+        else:
+            raise HTTPException(400, f"unknown action type: {action.type}")
+    return {"ok": True, "results": results}
 
 
 @app.get("/healthz")

@@ -29,6 +29,12 @@ DEFAULT_SNAPSHOT_PATH = "/run/agent-snapshot.json"
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 STARFORGE_CALLBACK_TOKEN = os.environ.get("STARFORGE_CALLBACK_TOKEN", "")
 STARFORGE_CALLBACK_URL_FALLBACK = os.environ.get("STARFORGE_CALLBACK_URL", "")
+STARFORGE_MEMBER_ID = os.environ.get("STARFORGE_MEMBER_ID", "")
+
+# Task-mode tool loop limits
+TOOL_LOOP_MAX_ITER = 12
+TOOL_HTTP_TIMEOUT = 10.0
+TOOL_HTTP_BODY_PREVIEW = 800
 
 logging.basicConfig(level=logging.INFO, format="[nemoclaw] %(message)s")
 log = logging.getLogger("nemoclaw")
@@ -154,97 +160,268 @@ async def cancel_run(
 
 # ---------- Claude invocation ----------
 
-async def _call_anthropic(*, model: str, system_prompt: str, user_content: str) -> dict[str, Any]:
-    import anthropic  # type: ignore
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    resp = await asyncio.to_thread(
-        client.messages.create,
-        model=model,
-        max_tokens=4096,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_content}],
-    )
-    text = "\n".join(
-        getattr(b, "text", "") for b in resp.content if getattr(b, "type", None) == "text"
-    ).strip()
-    usage = getattr(resp, "usage", None)
-    return {
-        "output": text,
-        "tokens_in": getattr(usage, "input_tokens", None) if usage else None,
-        "tokens_out": getattr(usage, "output_tokens", None) if usage else None,
-    }
+async def _llm_completion(
+    *, messages: list[dict[str, Any]], provider: str, model: str,
+    provider_endpoint: str,
+) -> tuple[str, Optional[int], Optional[int]]:
+    """One round-trip to the configured LLM. Returns (text, tokens_in, tokens_out)."""
+    if provider == "anthropic":
+        if not ANTHROPIC_API_KEY:
+            raise RuntimeError("ANTHROPIC_API_KEY is not set on this container")
+        import anthropic  # type: ignore
+        # Anthropic expects system as a top-level param, not in messages
+        system_msgs = [m["content"] for m in messages if m["role"] == "system"]
+        non_system = [m for m in messages if m["role"] != "system"]
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        resp = await asyncio.to_thread(
+            client.messages.create,
+            model=model,
+            max_tokens=1024,
+            system="\n\n".join(system_msgs) if system_msgs else "",
+            messages=non_system,
+        )
+        text = "\n".join(
+            getattr(b, "text", "") for b in resp.content
+            if getattr(b, "type", None) == "text"
+        ).strip()
+        usage = getattr(resp, "usage", None)
+        return (
+            text,
+            getattr(usage, "input_tokens", None) if usage else None,
+            getattr(usage, "output_tokens", None) if usage else None,
+        )
+    if provider in ("openai", "ollama"):
+        from openai import OpenAI  # type: ignore
+        base_url = provider_endpoint or None
+        api_key = os.environ.get("OPENAI_API_KEY", "unused")
+        client = OpenAI(api_key=api_key or "unused", base_url=base_url) if base_url else OpenAI(api_key=api_key)
+        resp = await asyncio.to_thread(
+            client.chat.completions.create,
+            model=model,
+            max_tokens=1024,
+            messages=messages,
+        )
+        text = (resp.choices[0].message.content or "").strip() if resp.choices else ""
+        usage = getattr(resp, "usage", None)
+        return (
+            text,
+            getattr(usage, "prompt_tokens", None) if usage else None,
+            getattr(usage, "completion_tokens", None) if usage else None,
+        )
+    raise RuntimeError(f"unknown provider: {provider!r}")
 
 
-async def _call_openai_compatible(
-    *, model: str, system_prompt: str, user_content: str,
-    base_url: Optional[str], api_key: str,
-) -> dict[str, Any]:
-    """Works for OpenAI itself and any OpenAI-compatible endpoint (Ollama, vLLM, etc.).
+_TOOL_INSTRUCTIONS = """
+You have been assigned a task. Use the tools below to investigate and report back.
 
-    Ollama at http://host:11434/v1/chat/completions speaks this wire format,
-    so the same code path covers local + cloud."""
-    from openai import OpenAI  # type: ignore
-    # Ollama doesn't validate api_key but the SDK insists on one being non-empty
-    client = OpenAI(api_key=api_key or "unused", base_url=base_url) if base_url else OpenAI(api_key=api_key)
-    resp = await asyncio.to_thread(
-        client.chat.completions.create,
-        model=model,
-        max_tokens=4096,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
+RESPOND WITH EXACTLY ONE JSON OBJECT PER TURN, NO OTHER TEXT, NO MARKDOWN FENCES.
+
+Available tools:
+{"tool": "http_get", "url": "..."}                          — fetch a URL
+{"tool": "set_task_status", "status": "in_progress"}        — also: "under_review", "done"
+{"tool": "add_comment", "body": "..."}                      — post a comment with your findings
+{"tool": "finish"}                                          — end the run
+
+REQUIRED WORKFLOW:
+1. First turn: call set_task_status with status="in_progress"
+2. Investigation turns: call http_get (or other tools) to gather evidence
+3. When you have findings: call add_comment with a clear, evidence-backed summary
+4. Then: call set_task_status with status="under_review"
+5. Then: call finish
+
+After each tool call I will tell you the result; then respond with the next tool call.
+DO NOT WRITE PROSE. ONLY ONE JSON OBJECT PER RESPONSE.
+""".strip()
+
+
+def _parse_tool_call(text: str) -> Optional[dict[str, Any]]:
+    """Pull the first JSON object containing a 'tool' field out of the LLM response."""
+    if not text:
+        return None
+    # Strip markdown fences if present
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        # Remove ``` ... ``` wrappers
+        cleaned = cleaned.strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:]
+        cleaned = cleaned.strip()
+    # Try direct parse first
+    for candidate in (cleaned, _extract_first_json_object(cleaned)):
+        if not candidate:
+            continue
+        try:
+            obj = json.loads(candidate)
+            if isinstance(obj, dict) and "tool" in obj:
+                return obj
+        except (json.JSONDecodeError, ValueError):
+            continue
+    return None
+
+
+def _extract_first_json_object(text: str) -> Optional[str]:
+    """Best-effort: find the first {...} that's a balanced JSON object."""
+    depth = 0
+    start = None
+    in_str = False
+    esc = False
+    for i, ch in enumerate(text):
+        if esc:
+            esc = False
+            continue
+        if ch == "\\":
+            esc = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start is not None:
+                return text[start: i + 1]
+    return None
+
+
+async def _tool_http_get(url: str) -> str:
+    try:
+        async with httpx.AsyncClient(timeout=TOOL_HTTP_TIMEOUT, follow_redirects=True) as client:
+            r = await client.get(url)
+        body = r.text[:TOOL_HTTP_BODY_PREVIEW]
+        truncated = "" if len(r.text) <= TOOL_HTTP_BODY_PREVIEW else f"\n[truncated, total {len(r.text)} bytes]"
+        return f"HTTP {r.status_code} from {url}\nheaders: {dict(r.headers)}\nbody:\n{body}{truncated}"
+    except httpx.TimeoutException:
+        return f"HTTP timeout (>{TOOL_HTTP_TIMEOUT}s) fetching {url}"
+    except Exception as e:  # noqa: BLE001
+        return f"HTTP error fetching {url}: {e}"
+
+
+async def _tool_task_action(
+    *, action_type: str, task_id: int, callback_url: str, callback_token: str,
+    status: Optional[str] = None, body: Optional[str] = None,
+) -> str:
+    if not callback_url or not STARFORGE_MEMBER_ID:
+        return f"error: cannot perform {action_type} — missing callback_url or member id"
+    payload = {
+        "agent_member_id": int(STARFORGE_MEMBER_ID),
+        "task_id": task_id,
+        "actions": [
+            {"type": action_type, **({"status": status} if status else {}),
+                                  **({"body": body} if body else {})}
         ],
-    )
-    text = (resp.choices[0].message.content or "").strip() if resp.choices else ""
-    usage = getattr(resp, "usage", None)
-    return {
-        "output": text,
-        "tokens_in": getattr(usage, "prompt_tokens", None) if usage else None,
-        "tokens_out": getattr(usage, "completion_tokens", None) if usage else None,
     }
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(
+                f"{callback_url.rstrip('/')}/api/agents/task-actions",
+                json=payload,
+                headers={"Authorization": f"Bearer {callback_token}"},
+            )
+        if r.status_code >= 400:
+            return f"task-action error: HTTP {r.status_code} {r.text[:200]}"
+        return f"ok: {action_type} applied"
+    except Exception as e:  # noqa: BLE001
+        return f"task-action error: {e}"
 
 
 async def _run_agent(
     *, run_id: str, inputs: dict[str, Any],
     callback_url: str, callback_token: str,
 ) -> None:
-    """Background task: build messages from snapshot + inputs, call the configured
-    LLM provider, POST result back to Starforge."""
+    """Tool-using loop when invoked with a task_id, otherwise single-shot Q+A."""
     try:
         agent_block = (SNAPSHOT or {}).get("config", {}).get("agent", {}) or {}
         system_prompt = (SNAPSHOT or {}).get("system_prompt", "") or agent_block.get("system_prompt", "") or ""
         if isinstance(system_prompt, dict):
-            # Defensive — shouldn't happen post-resolver
             system_prompt = json.dumps(system_prompt)
         model = agent_block.get("model", "claude-sonnet-4-6")
         provider = (agent_block.get("provider") or "anthropic").lower()
         provider_endpoint = agent_block.get("provider_endpoint", "")
 
-        # For C.1 we frame the run as a single user turn containing the inputs.
-        user_content = json.dumps(inputs, indent=2)
+        task_id = inputs.get("task_id")
+        is_task_mode = bool(task_id)
 
-        if provider == "anthropic":
-            if not ANTHROPIC_API_KEY:
-                raise RuntimeError("ANTHROPIC_API_KEY is not set on this container")
-            llm_result = await _call_anthropic(
-                model=model, system_prompt=system_prompt, user_content=user_content,
+        if not is_task_mode:
+            # Manual run: legacy single-shot behavior
+            user_content = json.dumps(inputs, indent=2)
+            text, t_in, t_out = await _llm_completion(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+                provider=provider, model=model, provider_endpoint=provider_endpoint,
             )
-        elif provider in ("openai", "ollama"):
-            base_url = provider_endpoint or None
-            api_key = os.environ.get(
-                "OPENAI_API_KEY",
-                ANTHROPIC_API_KEY,  # not used by Ollama but the SDK needs something
-            )
-            llm_result = await _call_openai_compatible(
-                model=model, system_prompt=system_prompt, user_content=user_content,
-                base_url=base_url, api_key=api_key,
-            )
+            result: dict[str, Any] = {
+                "status": "succeeded", "output": text,
+                "tokens_in": t_in, "tokens_out": t_out,
+            }
         else:
-            raise RuntimeError(
-                f"unknown provider: {provider!r} (expected anthropic | openai | ollama)"
+            # Task mode: tool-using loop
+            task_intro = (
+                f"You have been assigned task #{task_id}:\n"
+                f"Title: {inputs.get('task_title', '')}\n"
+                f"Description: {inputs.get('task_description', '')}\n\n"
+                "Start by setting status to in_progress."
             )
-
-        result: dict[str, Any] = {"status": "succeeded", **llm_result}
+            messages: list[dict[str, Any]] = [
+                {"role": "system", "content": system_prompt + "\n\n" + _TOOL_INSTRUCTIONS},
+                {"role": "user", "content": task_intro},
+            ]
+            total_in = 0
+            total_out = 0
+            outputs: list[str] = []
+            finished = False
+            for i in range(TOOL_LOOP_MAX_ITER):
+                text, t_in, t_out = await _llm_completion(
+                    messages=messages, provider=provider, model=model,
+                    provider_endpoint=provider_endpoint,
+                )
+                if t_in: total_in += t_in
+                if t_out: total_out += t_out
+                messages.append({"role": "assistant", "content": text})
+                tool = _parse_tool_call(text)
+                if not tool:
+                    outputs.append(f"[iter {i+1}] non-tool response: {text[:300]}")
+                    # Nudge the model back to JSON
+                    messages.append({"role": "user", "content":
+                        "Your response was not a single JSON tool call. "
+                        "Respond with EXACTLY one JSON object like "
+                        '{"tool": "...", ...} and nothing else.'})
+                    continue
+                name = tool.get("tool")
+                outputs.append(f"[iter {i+1}] {name}: {json.dumps(tool)[:200]}")
+                if name == "finish":
+                    finished = True
+                    break
+                elif name == "http_get":
+                    url = tool.get("url", "")
+                    res = await _tool_http_get(url)
+                elif name == "set_task_status":
+                    res = await _tool_task_action(
+                        action_type="set_status", task_id=task_id,
+                        callback_url=callback_url, callback_token=callback_token,
+                        status=tool.get("status"),
+                    )
+                elif name == "add_comment":
+                    res = await _tool_task_action(
+                        action_type="comment", task_id=task_id,
+                        callback_url=callback_url, callback_token=callback_token,
+                        body=tool.get("body"),
+                    )
+                else:
+                    res = f"unknown tool: {name!r}"
+                messages.append({"role": "user", "content": f"Tool result: {res}"})
+            result = {
+                "status": "succeeded" if finished else "succeeded",
+                "output": "\n".join(outputs) + ("\n[max iterations reached]" if not finished else ""),
+                "tokens_in": total_in or None,
+                "tokens_out": total_out or None,
+            }
     except asyncio.CancelledError:
         result = {"status": "failed", "error": "cancelled"}
     except Exception as e:  # noqa: BLE001
