@@ -37,9 +37,10 @@ def _create_ai_member(admin_client, pid: int, name="AI") -> dict:
 
 # ---------- health reconciliation ----------
 
-def test_killed_container_flips_to_stopped(admin_client, fake_runtime):
+def test_killed_container_resets_to_not_provisioned(admin_client, fake_runtime):
     """User-reported bug: kill the container externally — health check should
-    catch it and reconcile runtime_status."""
+    catch it, flip status, AND clear container_id so the next Start does a
+    fresh provision instead of trying to start a dead ID."""
     import app
     p = _new_project(admin_client, "Health Killed Project")
     _configure_runtime(admin_client, p["id"])
@@ -47,16 +48,39 @@ def test_killed_container_flips_to_stopped(admin_client, fake_runtime):
     assert member["runtime_status"] == "running"
     cid = member["runtime_container_id"]
 
-    # Simulate `docker kill` by removing the container from FakeRuntime's store
+    # Simulate `docker rm -f` by removing the container from FakeRuntime's store
     fake_runtime.containers.pop(cid, None)
 
-    # Health check should detect the missing container and flip status
     asyncio.run(app.check_member_health(member["id"]))
 
     out = admin_client.get(f"/api/projects/{p['id']}/members").json()
     rec = next(m for m in out if m["id"] == member["id"])
-    assert rec["runtime_status"] == "stopped"
+    assert rec["runtime_status"] == "not_provisioned"
+    assert rec["runtime_container_id"] is None
+    assert rec["runtime_endpoint"] is None
     assert "no longer exists" in (rec["runtime_error"] or "")
+
+
+def test_start_after_external_kill_provisions_fresh(admin_client, fake_runtime):
+    """Closing the loop on the user-reported scenario: kill container, click
+    Start, expect a NEW container in fake_runtime (fresh provision, not a
+    no-op `docker start` of the dead ID)."""
+    import app
+    p = _new_project(admin_client, "Start After Kill Project")
+    _configure_runtime(admin_client, p["id"])
+    member = _create_ai_member(admin_client, p["id"])
+    original_cid = member["runtime_container_id"]
+
+    # External kill
+    fake_runtime.containers.pop(original_cid, None)
+
+    # Click Start (no prior health check yet — endpoint must handle stale ID itself)
+    r = admin_client.post(f"/api/team-members/{member['id']}/runtime/start")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["runtime_status"] == "running"
+    assert body["runtime_container_id"] != original_cid
+    assert body["runtime_container_id"] in fake_runtime.containers
 
 
 def test_exited_container_flips_to_stopped(admin_client, fake_runtime):
@@ -130,4 +154,5 @@ def test_admin_endpoint_triggers_health_check(admin_client, fake_runtime):
 
     out = admin_client.get(f"/api/projects/{p['id']}/members").json()
     rec = next(m for m in out if m["id"] == member["id"])
-    assert rec["runtime_status"] == "stopped"
+    assert rec["runtime_status"] == "not_provisioned"
+    assert rec["runtime_container_id"] is None

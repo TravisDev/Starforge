@@ -1471,7 +1471,9 @@ async def member_runtime_start(mid: int, _: dict = Depends(current_user)):
 
     cid = member.get("runtime_container_id")
     if cid:
-        # Container exists — just start it
+        # We have an ID — but verify the container is actually still there.
+        # If someone `docker rm -f`'d it, the ID is dead; we need a fresh
+        # provision, not a no-op `docker start`.
         project = get_project_row(member["project_id"]) or {}
         try:
             rt_cfg = json.loads(project.get("runtime_config") or "{}")
@@ -1480,10 +1482,23 @@ async def member_runtime_start(mid: int, _: dict = Depends(current_user)):
         rt = get_runtime_for_project(rt_cfg)
         if rt is None:
             raise HTTPException(400, "no runtime configured for this project")
+        inspection = await rt.inspect(cid)
+        if inspection is None:
+            # Stale ID — clear and provision fresh
+            _set_member_runtime_state(
+                mid,
+                runtime_container_id=None,
+                runtime_endpoint=None,
+                runtime_image_digest=None,
+                runtime_started_at=None,
+                runtime_error=None,
+            )
+            cid = None
+
+    if cid:
         await rt.start(cid)
         _set_member_runtime_state(mid, runtime_status="running", runtime_error=None)
     else:
-        # Fresh provision
         await _trigger_provision(mid, member["project_id"])
     with db() as conn:
         row = conn.execute("SELECT * FROM team_members WHERE id = ?", (mid,)).fetchone()
@@ -2014,20 +2029,26 @@ async def check_member_health(member_id: int) -> Optional[str]:
 
     inspection = await rt.inspect(member["runtime_container_id"])
     if inspection is None:
-        # Container vanished entirely
+        # Container vanished entirely — clear identity so the next Start
+        # does a fresh provision instead of trying to start a dead ID.
         _set_member_runtime_state(
             member_id,
-            runtime_status="stopped",
+            runtime_status="not_provisioned",
+            runtime_container_id=None,
+            runtime_endpoint=None,
+            runtime_image_digest=None,
+            runtime_started_at=None,
             runtime_error="container no longer exists (killed or removed externally)",
         )
-        return "stopped"
+        return "not_provisioned"
 
     docker_status = inspection.status
     if docker_status == "running":
         if member["runtime_status"] != "running":
             _set_member_runtime_state(member_id, runtime_status="running", runtime_error=None)
         return "running"
-    # Anything not "running" (exited, dead, paused, restarting, …) → reconcile
+    # Container exists but isn't running (exited, paused, restarting, …) →
+    # keep the container_id so Start can resume it via `docker start`.
     _set_member_runtime_state(
         member_id,
         runtime_status="stopped",
