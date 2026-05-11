@@ -2117,12 +2117,21 @@ async def update_task(task_id: int, patch: TaskUpdate, _: dict = Depends(current
         conn.execute(f"UPDATE tasks SET {', '.join(fields)} WHERE id = ?", params)
         row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
     out = row_to_task(row, _fetch_member_for(row["assignee_id"]))
-    # Auto-trigger if the assignee_id just changed to a running AI agent
-    if (
+    # Auto-trigger the assigned agent when either:
+    #   (a) the task was just (re)assigned to a different AI agent, OR
+    #   (b) the task was moved back into the "todo" column (e.g. dragged back
+    #       for re-investigation, or reopened after being marked done)
+    assignee_changed = (
         "assignee_id" in data
         and data["assignee_id"]
         and data["assignee_id"] != existing["assignee_id"]
-    ):
+    )
+    moved_to_todo = (
+        "status" in data
+        and data["status"] == "todo"
+        and existing["status"] != "todo"
+    )
+    if assignee_changed or moved_to_todo:
         asyncio.create_task(_maybe_trigger_agent_for_task(out))
     return out
 

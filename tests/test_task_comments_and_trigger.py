@@ -208,6 +208,48 @@ def test_assignment_trigger_skips_human_assignee(admin_client, fake_runtime):
         app._invoke_http_override = None
 
 
+def test_moving_back_to_todo_triggers_run(admin_client, fake_runtime):
+    """Dragging a task back into the todo column should re-notify the assigned agent."""
+    import app
+    p = _new_project(admin_client, "Back-To-Todo Trigger")
+    _configure_runtime(admin_client, p["id"])
+    member = _create_ai_member(admin_client, p["id"])
+    # Create task already in done state, assigned to the agent
+    t = _new_task(admin_client, p["id"], "re-open me", assignee_id=member["id"], status="done")
+    app._invoke_http_override = _RecordingDispatcher()
+    try:
+        r = admin_client.patch(f"/tasks/{t['id']}", json={"status": "todo"})
+        assert r.status_code == 200
+        asyncio.run(asyncio.sleep(0.05))
+        triggered = [run for run in admin_client.get(f"/api/team-members/{member['id']}/runs").json()
+                      if run["inputs"].get("task_id") == t["id"]]
+        assert len(triggered) == 1, f"expected one run triggered by status→todo, got {triggered}"
+    finally:
+        app._invoke_http_override = None
+
+
+def test_already_in_todo_no_trigger_on_status_no_op(admin_client, fake_runtime):
+    """PATCHing status=todo when the task is already in todo shouldn't re-trigger."""
+    import app
+    p = _new_project(admin_client, "No-Op Todo Trigger")
+    _configure_runtime(admin_client, p["id"])
+    member = _create_ai_member(admin_client, p["id"])
+    # Task starts in todo. The create-time trigger fires once.
+    t = _new_task(admin_client, p["id"], "stay put", assignee_id=member["id"])
+    asyncio.run(asyncio.sleep(0.05))
+    before = len([run for run in admin_client.get(f"/api/team-members/{member['id']}/runs").json()
+                  if run["inputs"].get("task_id") == t["id"]])
+    app._invoke_http_override = _RecordingDispatcher()
+    try:
+        admin_client.patch(f"/tasks/{t['id']}", json={"status": "todo"})
+        asyncio.run(asyncio.sleep(0.05))
+        after = len([run for run in admin_client.get(f"/api/team-members/{member['id']}/runs").json()
+                     if run["inputs"].get("task_id") == t["id"]])
+        assert after == before, "no new run should fire when status was already todo"
+    finally:
+        app._invoke_http_override = None
+
+
 def test_assignment_trigger_idempotent(admin_client, fake_runtime):
     """Repeated patches assigning the SAME agent shouldn't fire duplicate runs."""
     import app
