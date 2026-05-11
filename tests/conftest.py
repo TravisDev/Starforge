@@ -18,6 +18,8 @@ import pytest
 # Critical: set the data dir BEFORE app is imported.
 _TEST_DATA_DIR = tempfile.mkdtemp(prefix="starforge-test-")
 os.environ["STARFORGE_DATA_DIR"] = _TEST_DATA_DIR
+# Disable the image-update background loop in tests; we drive update checks directly.
+os.environ["STARFORGE_DISABLE_BACKGROUND_TASKS"] = "1"
 
 # Make the project root importable so `import app` works regardless of cwd.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent

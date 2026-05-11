@@ -85,6 +85,28 @@
   </section>
 
   <section>
+    <h2>AI agent runtime
+      <button id="saveIntervalBtn" class="primary">Save</button>
+    </h2>
+    <div style="display:flex;align-items:center;gap:14px;font-size:13px;flex-wrap:wrap">
+      <label style="display:flex;flex-direction:column;gap:4px">
+        <span style="color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:0.5px">
+          Image update check interval (seconds)
+        </span>
+        <input id="updateInterval" type="number" min="0" max="86400" step="30"
+               style="width:160px;background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px;font:inherit;font-size:13px" />
+      </label>
+      <div style="font-size:11px;color:var(--muted);line-height:1.5;max-width:480px">
+        How often Starforge polls each running AI member's registry for a newer image.
+        Set <code>0</code> to disable polling (you can still trigger checks manually).
+        Default: <code>300</code> (5 min). The yellow <strong>Update</strong> button on the
+        team pane appears whenever the registry has a newer digest than the running container.
+      </div>
+      <button id="checkNowBtn">Check all now</button>
+    </div>
+  </section>
+
+  <section>
     <h2>Active sessions
       <button id="refreshSessions">Refresh</button>
     </h2>
@@ -188,6 +210,27 @@ async function loadSessions() {
 }
 $("refreshSessions").onclick = loadSessions;
 
+async function loadInterval() {
+  const data = await api("/api/admin/settings/update-check-interval");
+  $("updateInterval").value = data.seconds;
+}
+$("saveIntervalBtn").onclick = async () => {
+  const seconds = Number($("updateInterval").value);
+  if (!Number.isFinite(seconds) || seconds < 0) { toast("Must be ≥ 0", "err"); return; }
+  try {
+    await api("/api/admin/settings/update-check-interval",
+              { method: "PUT", body: JSON.stringify({ seconds }) });
+    toast("Saved — change applies on the next poll cycle");
+  } catch (e) { toast(e.message, "err"); }
+};
+$("checkNowBtn").onclick = async () => {
+  try {
+    const r = await api("/api/admin/check-image-updates", { method: "POST" });
+    toast(`Checked ${r.checked} member(s)`);
+  } catch (e) { toast(e.message, "err"); }
+};
+
+loadInterval();
 loadSso();
 loadSessions();
 </script>

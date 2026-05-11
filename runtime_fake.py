@@ -77,6 +77,14 @@ class FakeRuntime(RuntimeAdapter):
         self.calls.append(("remove", container_id))
         self.containers.pop(container_id, None)
 
+    def set_registry_digest(self, image: str, digest: str) -> None:
+        """Test helper: simulate the registry advancing (e.g., a new tag push)."""
+        self.image_digests[image] = digest
+
+    async def get_registry_digest(self, image: str) -> Optional[str]:
+        self.calls.append(("get_registry_digest", image))
+        return self.image_digests.get(image)
+
     async def inspect(self, container_id: str) -> Optional[InspectResult]:
         c = self.containers.get(container_id)
         if not c:

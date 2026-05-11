@@ -215,6 +215,31 @@
   .runtime-dot[data-status="error"]           { background: #ff7171; }
   @keyframes rt-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 
+  /* Yellow "Update" pill — appears next to AI members when a newer image
+     is available at the registry. Click → restart with pull. */
+  .update-btn {
+    background: #f0b429; color: #0b1020;
+    border: none; border-radius: 3px;
+    padding: 1px 6px; font-size: 9px; font-weight: 700;
+    cursor: pointer; margin-left: 6px; vertical-align: middle;
+    text-transform: uppercase; letter-spacing: 0.5px;
+    font-family: inherit;
+  }
+  .update-btn:hover { background: #ffcc4b; }
+  .update-btn:disabled { opacity: 0.5; cursor: progress; }
+
+  /* Runtime action row inside the member modal */
+  .rt-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .rt-actions button {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    padding: 6px 10px; border-radius: 6px; cursor: pointer;
+    font: inherit; font-size: 12px;
+  }
+  .rt-actions button:hover { border-color: var(--accent); color: var(--accent); }
+  .rt-actions button.update { background: #f0b429; color: #0b1020; border-color: #f0b429; font-weight: 600; }
+  .rt-actions button.update:hover { background: #ffcc4b; color: #0b1020; }
+  .rt-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
+
   /* Type toggle inside member modal */
   .type-toggle { display: flex; gap: 6px; }
   .type-toggle button {
@@ -425,6 +450,10 @@
     <div id="m-snapshotRow" style="display:none">
       <label>Agent snapshot</label>
       <div class="snapshot-box" id="m-snapshot"></div>
+    </div>
+    <div id="m-runtimeActionsRow" style="display:none">
+      <label>Runtime</label>
+      <div class="rt-actions" id="m-runtimeActions"></div>
     </div>
     <div id="m-activeRow" style="display:none;font-size:12px;color:var(--muted)">
       <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
@@ -885,10 +914,13 @@ function renderTeam() {
     const runtimeDot = m.type === "ai_agent"
       ? `<span class="runtime-dot" data-status="${escapeHtml(m.runtime_status || "not_provisioned")}" title="runtime: ${escapeHtml(m.runtime_status || "not_provisioned")}"></span>`
       : "";
+    const updateBtn = m.update_available
+      ? `<button class="update-btn" data-update-mid="${m.id}" title="Newer image available. Click to update.">Update</button>`
+      : "";
     row.innerHTML = `
       <div class="av" style="background:${m.color}">${(m.name[0] || "?").toUpperCase()}</div>
       <div class="info">
-        <div class="name">${escapeHtml(m.name)} ${runtimeDot}</div>
+        <div class="name">${escapeHtml(m.name)} ${runtimeDot}${updateBtn}</div>
         <div class="role">${escapeHtml(m.role || (m.type === "ai_agent" ? "AI Agent" : "Member"))}</div>
       </div>
       <div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">
@@ -896,6 +928,21 @@ function renderTeam() {
         ${typeTag}
       </div>
     `;
+    // Wire the inline Update button (don't open the modal when clicked)
+    const upBtn = row.querySelector("[data-update-mid]");
+    if (upBtn) upBtn.onclick = async (e) => {
+      e.stopPropagation();
+      upBtn.disabled = true; upBtn.textContent = "Updating…";
+      try {
+        const r = await fetch(`/api/team-members/${upBtn.dataset.updateMid}/runtime/restart?pull=true`,
+                              { method: "POST" });
+        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.status);
+        await loadTeam();
+      } catch (err) {
+        alert("update failed: " + err.message);
+        upBtn.disabled = false; upBtn.textContent = "Update";
+      }
+    };
     row.onclick = () => openMemberModal(m);
     list.appendChild(row);
   });
@@ -941,12 +988,68 @@ function openMemberModal(member = null) {
   document.getElementById("m-active").checked = member ? !!member.is_active : true;
   document.getElementById("m-activeRow").style.display = member ? "" : "none";
   document.getElementById("memDelete").style.display = member ? "" : "none";
-  // Snapshot panel: only visible when editing an existing AI agent member
+  // Snapshot panel + runtime actions: only visible when editing an existing AI agent member
   const showSnap = !!member && member.type === "ai_agent";
   document.getElementById("m-snapshotRow").style.display = showSnap ? "" : "none";
-  if (showSnap) loadMemberSnapshot(member.id);
+  document.getElementById("m-runtimeActionsRow").style.display = showSnap ? "" : "none";
+  if (showSnap) {
+    loadMemberSnapshot(member.id);
+    renderRuntimeActions(member);
+  }
   document.getElementById("memOverlay").classList.add("open");
   document.getElementById("m-name").focus();
+}
+
+function renderRuntimeActions(member) {
+  const box = document.getElementById("m-runtimeActions");
+  const status = member.runtime_status || "not_provisioned";
+  const hasContainer = !!member.runtime_container_id;
+  const buttons = [];
+  if (!hasContainer) {
+    buttons.push(`<button data-rt="start">Start</button>`);
+  } else if (status === "running") {
+    buttons.push(`<button data-rt="stop">Stop</button>`);
+    buttons.push(`<button data-rt="restart">Restart</button>`);
+    if (member.update_available) {
+      buttons.push(`<button class="update" data-rt="update">Update (pull + restart)</button>`);
+    } else {
+      buttons.push(`<button data-rt="check">Check for updates</button>`);
+    }
+  } else if (status === "stopped") {
+    buttons.push(`<button data-rt="start">Start</button>`);
+    buttons.push(`<button data-rt="restart">Restart</button>`);
+  } else if (status === "error") {
+    buttons.push(`<button data-rt="restart">Retry (restart)</button>`);
+  } else if (status === "starting") {
+    buttons.push(`<button disabled>Starting…</button>`);
+  }
+  box.innerHTML = buttons.join("") +
+    `<span style="margin-left:auto;font-size:11px;color:var(--muted)">
+       status: <strong>${escapeHtml(status)}</strong>${member.runtime_error ? " · " + escapeHtml(member.runtime_error) : ""}
+     </span>`;
+
+  box.querySelectorAll("[data-rt]").forEach(btn => btn.onclick = async () => {
+    const action = btn.dataset.rt;
+    btn.disabled = true;
+    try {
+      let url, pull = false;
+      if (action === "start") url = `/api/team-members/${member.id}/runtime/start`;
+      else if (action === "stop") url = `/api/team-members/${member.id}/runtime/stop`;
+      else if (action === "restart") url = `/api/team-members/${member.id}/runtime/restart`;
+      else if (action === "update") { url = `/api/team-members/${member.id}/runtime/restart?pull=true`; pull = true; }
+      else if (action === "check") url = `/api/team-members/${member.id}/check-image-update`;
+      const r = await fetch(url, { method: "POST" });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.status);
+      const updated = await r.json().catch(() => null);
+      if (updated && updated.id) {
+        renderRuntimeActions(updated);
+      }
+      await loadTeam();
+    } catch (err) {
+      alert("action failed: " + err.message);
+      btn.disabled = false;
+    }
+  });
 }
 
 async function loadMemberSnapshot(memberId) {

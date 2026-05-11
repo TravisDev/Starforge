@@ -70,3 +70,12 @@ class RuntimeAdapter(ABC):
     @abstractmethod
     async def pull_image(self, image: str) -> str:
         """Pull (or re-pull) and return the resulting digest."""
+
+    @abstractmethod
+    async def get_registry_digest(self, image: str) -> Optional[str]:
+        """Look up the current digest in the source registry without pulling layers.
+
+        Returns None if it can't be determined (image not in registry, auth fail,
+        registry unreachable). The caller treats None as 'no info, leave alone',
+        not 'no update'.
+        """

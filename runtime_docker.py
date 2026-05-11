@@ -47,6 +47,15 @@ class DockerRuntime(RuntimeAdapter):
         img = await self._run(self.client.images.pull, image)
         return getattr(img, "id", "") or ""
 
+    async def get_registry_digest(self, image: str) -> Optional[str]:
+        """Manifest-only lookup against the source registry. Doesn't pull layers."""
+        try:
+            data = await self._run(self.client.images.get_registry_data, image)
+            return getattr(data, "id", None)
+        except Exception as e:  # noqa: BLE001
+            log.warning("get_registry_digest(%s) failed: %s", image, e)
+            return None
+
     async def provision(
         self,
         *,

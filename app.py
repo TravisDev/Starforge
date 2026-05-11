@@ -5,14 +5,19 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
+import os
 import re
 import sqlite3
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
 
 import yaml
 
 from runtime_adapter import RuntimeAdapter
+
+log = logging.getLogger("starforge")
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
@@ -162,6 +167,8 @@ def init_team_members_schema() -> None:
             conn.execute("ALTER TABLE team_members ADD COLUMN runtime_started_at TEXT")
         if "runtime_image_digest" not in cols:
             conn.execute("ALTER TABLE team_members ADD COLUMN runtime_image_digest TEXT")
+        if "runtime_image_digest_latest" not in cols:
+            conn.execute("ALTER TABLE team_members ADD COLUMN runtime_image_digest_latest TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_team_project ON team_members(project_id)")
 
 
@@ -170,7 +177,59 @@ init_projects_schema()
 init_team_members_schema()
 init_tasks_schema()
 
-app = FastAPI(title="Starforge", version="0.3.0")
+
+# ---------- App settings (generic key/value, used for runtime intervals etc.) ----------
+
+def get_app_setting(key: str, default: str = "") -> str:
+    with db() as conn:
+        row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_app_setting(key: str, value: str) -> None:
+    ts = now_iso()
+    with db() as conn:
+        conn.execute(
+            """INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+                                              updated_at = excluded.updated_at""",
+            (key, value, ts),
+        )
+
+
+UPDATE_CHECK_KEY = "image_update_check_interval_seconds"
+DEFAULT_UPDATE_INTERVAL = 300  # 5 minutes
+
+
+def get_update_check_interval() -> int:
+    raw = get_app_setting(UPDATE_CHECK_KEY, str(DEFAULT_UPDATE_INTERVAL))
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_UPDATE_INTERVAL
+
+
+# Will be populated below once the check functions are defined.
+_update_loop_task: Optional[asyncio.Task] = None
+
+
+@asynccontextmanager
+async def lifespan(_app):
+    """Start the background image-update poller. Disabled when
+    STARFORGE_DISABLE_BACKGROUND_TASKS is set (used by the test suite)."""
+    global _update_loop_task
+    if not os.environ.get("STARFORGE_DISABLE_BACKGROUND_TASKS"):
+        _update_loop_task = asyncio.create_task(_image_update_loop())
+    yield
+    if _update_loop_task and not _update_loop_task.done():
+        _update_loop_task.cancel()
+        try:
+            await _update_loop_task
+        except asyncio.CancelledError:
+            pass
+
+
+app = FastAPI(title="Starforge", version="0.3.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
@@ -767,6 +826,43 @@ async def admin_revoke_session(sid: int, _: dict = Depends(current_admin)):
     revoke_session_id(sid)
 
 
+# ---------- Admin: image update check interval ----------
+
+class UpdateCheckInterval(BaseModel):
+    seconds: int = Field(ge=0, le=86400)
+
+
+@app.get("/api/admin/settings/update-check-interval")
+async def admin_get_update_interval(_: dict = Depends(current_admin)):
+    return {"seconds": get_update_check_interval()}
+
+
+@app.put("/api/admin/settings/update-check-interval")
+async def admin_set_update_interval(
+    body: UpdateCheckInterval, _: dict = Depends(current_admin)
+):
+    set_app_setting(UPDATE_CHECK_KEY, str(body.seconds))
+    return {"seconds": body.seconds}
+
+
+@app.post("/api/admin/check-image-updates")
+async def admin_trigger_image_check(_: dict = Depends(current_admin)):
+    """Run an image-update check immediately across every running AI member."""
+    n = await check_all_image_updates()
+    return {"ok": True, "checked": n}
+
+
+@app.post("/api/team-members/{mid}/check-image-update")
+async def trigger_member_image_check(mid: int, _: dict = Depends(current_user)):
+    """Run an image-update check for one member on demand."""
+    await check_image_update_for_member(mid)
+    with db() as conn:
+        row = conn.execute("SELECT * FROM team_members WHERE id = ?", (mid,)).fetchone()
+    if not row:
+        raise HTTPException(404, "team member not found")
+    return _row_to_member(row)
+
+
 # ---------- Projects ----------
 
 class ProjectCreate(BaseModel):
@@ -994,6 +1090,10 @@ def _row_to_member(row) -> dict[str, Any]:
         d["config"] = json.loads(d.get("config") or "{}")
     except json.JSONDecodeError:
         d["config"] = {}
+    # Computed: a newer image is at the registry than the one we're running.
+    running = d.get("runtime_image_digest")
+    latest = d.get("runtime_image_digest_latest")
+    d["update_available"] = bool(running and latest and running != latest)
     return d
 
 
@@ -1294,6 +1394,74 @@ async def member_runtime_restart(
 
 async def _set_member_runtime_state_async_starting(mid: int) -> None:
     _set_member_runtime_state(mid, runtime_status="starting", runtime_error=None)
+
+
+# ---------- Image update check ----------
+
+async def check_image_update_for_member(member_id: int) -> Optional[str]:
+    """Ask the registry for the current digest of this member's image and
+    persist it as runtime_image_digest_latest. Returns the digest (or None)."""
+    with db() as conn:
+        row = conn.execute("SELECT * FROM team_members WHERE id = ?", (member_id,)).fetchone()
+    if not row:
+        return None
+    member = _row_to_member(row)
+    if member["type"] != "ai_agent" or not member.get("runtime_container_id"):
+        return None
+    project = get_project_row(member["project_id"])
+    if not project:
+        return None
+    try:
+        rt_cfg = json.loads(project.get("runtime_config") or "{}")
+    except json.JSONDecodeError:
+        return None
+    try:
+        rt = get_runtime_for_project(rt_cfg)
+    except HTTPException:
+        return None
+    if rt is None:
+        return None
+    image = rt_cfg.get("image")
+    if not image:
+        return None
+    digest = await rt.get_registry_digest(image)
+    if digest is None:
+        return None
+    _set_member_runtime_state(member_id, runtime_image_digest_latest=digest)
+    return digest
+
+
+async def check_all_image_updates() -> int:
+    """Run an update check across every running AI member. Returns how many were checked."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT id FROM team_members "
+            "WHERE type = 'ai_agent' AND runtime_container_id IS NOT NULL"
+        ).fetchall()
+    n = 0
+    for r in rows:
+        try:
+            await check_image_update_for_member(r["id"])
+            n += 1
+        except Exception as e:  # noqa: BLE001
+            log.warning("image update check failed for member %s: %s", r["id"], e)
+    return n
+
+
+async def _image_update_loop() -> None:
+    """Background poll: rerun the image-update check on the configured interval."""
+    log.info("image update loop started")
+    while True:
+        interval = get_update_check_interval()
+        if interval <= 0:
+            # Disabled — poll the setting periodically so a re-enable takes effect.
+            await asyncio.sleep(30)
+            continue
+        try:
+            await check_all_image_updates()
+        except Exception as e:  # noqa: BLE001
+            log.exception("image update loop iteration failed: %s", e)
+        await asyncio.sleep(interval)
 
 
 # ---------- Tasks (auth required) ----------
