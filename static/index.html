@@ -502,10 +502,12 @@
 <div class="overlay" id="memOverlay">
   <div class="modal">
     <h3 id="memModalTitle">New team member</h3>
-    <label>Type</label>
-    <div class="type-toggle">
-      <button type="button" data-type="human">Human</button>
-      <button type="button" data-type="ai_agent">AI Agent</button>
+    <div id="m-typeRow">
+      <label>Type</label>
+      <div class="type-toggle">
+        <button type="button" data-type="human">Human</button>
+        <button type="button" data-type="ai_agent">AI Agent</button>
+      </div>
     </div>
     <div id="m-agentTypeRow" style="display:none">
       <label>Agent Type</label>
@@ -1362,6 +1364,8 @@ function openMemberModal(member = null) {
   document.getElementById("m-description").value = member?.description || "";
   setMemberType(member?.type || "human");
   document.getElementById("m-agent-type").value = member?.agent_type || "";
+  // Type is immutable after creation — hide the toggle when editing
+  document.getElementById("m-typeRow").style.display = member ? "none" : "";
   memberColor = member?.color || COLORS[0];
   renderMemberColors();
   document.getElementById("m-active").checked = member ? !!member.is_active : true;
@@ -1640,7 +1644,6 @@ document.querySelectorAll(".type-toggle button").forEach(b =>
 document.getElementById("memSave").onclick = async () => {
   const payload = {
     name: document.getElementById("m-name").value.trim(),
-    type: memberType,
     role: document.getElementById("m-role").value.trim(),
     email: document.getElementById("m-email").value.trim(),
     description: document.getElementById("m-description").value,
@@ -1649,6 +1652,8 @@ document.getElementById("memSave").onclick = async () => {
       ? (document.getElementById("m-agent-type").value || null)
       : null,
   };
+  // Type only goes in the payload on create — it's immutable after that
+  if (!editingMemberId) payload.type = memberType;
   if (!payload.name) { document.getElementById("m-name").focus(); return; }
   try {
     if (editingMemberId) {

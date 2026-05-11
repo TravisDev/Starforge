@@ -108,6 +108,22 @@ def test_create_member_without_agent_type_still_works(admin_client):
     assert r.json()["agent_type"] is None
 
 
+def test_member_type_is_immutable_after_creation(admin_client):
+    p = admin_client.post("/api/projects", json={"name": "Type Immutable Project"}).json()
+    create = admin_client.post(
+        f"/api/projects/{p['id']}/members",
+        json={"name": "Locked Type", "type": "human"},
+    )
+    mid = create.json()["id"]
+    # Trying to convert human → ai_agent must be rejected
+    r = admin_client.patch(f"/api/team-members/{mid}", json={"type": "ai_agent"})
+    assert r.status_code == 400
+    # PATCHing the same type (no-op) is fine
+    r2 = admin_client.patch(f"/api/team-members/{mid}", json={"type": "human", "role": "fixed role"})
+    assert r2.status_code == 200
+    assert r2.json()["role"] == "fixed role"
+
+
 def test_patch_member_to_invalid_agent_type_rejected(admin_client):
     p = _new_project(admin_client, "Net Project E")
     create = admin_client.post(

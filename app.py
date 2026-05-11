@@ -1332,8 +1332,10 @@ async def update_member(mid: int, body: TeamMemberUpdate, _: dict = Depends(curr
     if not existing:
         raise HTTPException(404, "team member not found")
     data = body.model_dump(exclude_unset=True)
-    if "type" in data and data["type"] not in VALID_MEMBER_TYPES:
-        raise HTTPException(400, f"invalid type; use one of {sorted(VALID_MEMBER_TYPES)}")
+    if "type" in data and data["type"] != existing["type"]:
+        # Type is immutable after creation — changing human <→ ai_agent would
+        # invalidate any running runtime container and break run history semantics.
+        raise HTTPException(400, "team member type cannot be changed after creation")
     if "color" in data and data["color"] not in VALID_COLORS:
         raise HTTPException(400, "invalid color")
     if "is_active" in data:
