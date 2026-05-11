@@ -268,6 +268,52 @@
 
   .runs-empty { padding: 14px; color: var(--muted); font-size: 12px; text-align: center; }
 
+  /* @-mention autocomplete popup */
+  .mention-popup {
+    position: fixed;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    box-shadow: 0 6px 24px rgba(0,0,0,0.5);
+    max-height: 200px;
+    overflow-y: auto;
+    z-index: 200;
+    min-width: 240px;
+    display: none;
+    padding: 4px;
+  }
+  .mention-popup.open { display: block; }
+  .mention-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    cursor: pointer;
+    font-size: 12px;
+    border-radius: 4px;
+  }
+  .mention-item:hover, .mention-item.selected { background: var(--panel2); }
+  .mention-item .av {
+    width: 18px; height: 18px; border-radius: 50%; flex-shrink: 0;
+    color: #0b1020; display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 10px;
+  }
+  .mention-item .meta { flex: 1; min-width: 0; }
+  .mention-item .name {
+    font-weight: 500;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .mention-item .agent-type {
+    font-size: 10px; color: var(--muted);
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+  }
+  .mention-item .slug {
+    color: var(--accent);
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 11px;
+    flex-shrink: 0;
+  }
+
   /* Type toggle inside member modal */
   .type-toggle { display: flex; gap: 6px; }
   .type-toggle button {
@@ -736,6 +782,140 @@ async function loadTaskComments(taskId) {
     list.innerHTML = `<div style="color:var(--error)">could not load comments: ${escapeHtml(e.message)}</div>`;
   }
 }
+
+// ---------- @mention autocomplete on comment input ----------
+//
+// Watches the comment input for an @-token at the caret. When present, shows
+// a floating popup of the project's active AI agents filtered by prefix.
+// Arrow keys navigate, Enter/Tab selects, Esc dismisses. Selection replaces
+// the partial @prefix with the full slug + space.
+
+const _mentionPopup = document.createElement("div");
+_mentionPopup.className = "mention-popup";
+document.body.appendChild(_mentionPopup);
+
+const _mentionState = { open: false, items: [], selected: 0, startPos: -1, prefix: "" };
+
+function _slugifyName(s) {
+  return String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
+}
+
+function _findMentionContext(input) {
+  const v = input.value;
+  const pos = input.selectionStart;
+  for (let i = pos - 1; i >= 0; i--) {
+    const ch = v[i];
+    if (ch === "@") {
+      if (i === 0 || /\s/.test(v[i - 1])) {
+        return { startPos: i, prefix: v.slice(i + 1, pos) };
+      }
+      return null;
+    }
+    if (/\s/.test(ch)) return null;
+  }
+  return null;
+}
+
+function _closeMentionPopup() {
+  _mentionState.open = false;
+  _mentionPopup.classList.remove("open");
+}
+
+function _renderMentionPopup(input) {
+  _mentionPopup.innerHTML = "";
+  _mentionState.items.forEach((m, idx) => {
+    const row = document.createElement("div");
+    row.className = "mention-item" + (idx === _mentionState.selected ? " selected" : "");
+    const slug = _slugifyName(m.name);
+    const initial = (m.name[0] || "?").toUpperCase();
+    row.innerHTML = `
+      <div class="av" style="background:${m.color}">${escapeHtml(initial)}</div>
+      <div class="meta">
+        <div class="name">${escapeHtml(m.name)}</div>
+        <div class="agent-type">${escapeHtml(m.agent_type || "")}</div>
+      </div>
+      <div class="slug">@${escapeHtml(slug)}</div>`;
+    row.onmousedown = (e) => { e.preventDefault(); _pickMention(idx, input); };
+    _mentionPopup.appendChild(row);
+  });
+  const rect = input.getBoundingClientRect();
+  _mentionPopup.style.left = rect.left + "px";
+  _mentionPopup.style.top = (rect.bottom + 4) + "px";
+  _mentionPopup.style.minWidth = Math.max(240, rect.width) + "px";
+  _mentionPopup.classList.add("open");
+  _mentionState.open = true;
+}
+
+function _updateMentionPopup(input) {
+  const ctx = _findMentionContext(input);
+  if (!ctx) { _closeMentionPopup(); return; }
+  const agents = (team || []).filter(m => m.type === "ai_agent" && m.is_active);
+  if (!agents.length) { _closeMentionPopup(); return; }
+  const prefix = ctx.prefix.toLowerCase();
+  const matches = prefix === ""
+    ? agents
+    : agents.filter(m => {
+        const slug = _slugifyName(m.name);
+        const at = (m.agent_type || "").toLowerCase();
+        return slug.includes(prefix) || at.includes(prefix) || m.name.toLowerCase().includes(prefix);
+      });
+  if (!matches.length) { _closeMentionPopup(); return; }
+  _mentionState.items = matches;
+  _mentionState.startPos = ctx.startPos;
+  _mentionState.prefix = ctx.prefix;
+  _mentionState.selected = 0;
+  _renderMentionPopup(input);
+}
+
+function _pickMention(idx, input) {
+  if (idx < 0 || idx >= _mentionState.items.length) return;
+  const m = _mentionState.items[idx];
+  const slug = _slugifyName(m.name);
+  const before = input.value.slice(0, _mentionState.startPos);
+  const after = input.value.slice(input.selectionStart);
+  input.value = before + "@" + slug + " " + after;
+  const caret = before.length + 1 + slug.length + 1;
+  input.setSelectionRange(caret, caret);
+  _closeMentionPopup();
+  input.focus();
+}
+
+// Wire to the comment input. The input is in the DOM the whole time; the
+// modal just hides it, so attaching listeners once is fine.
+const _commentInput = document.getElementById("t-newComment");
+_commentInput.addEventListener("input", () => _updateMentionPopup(_commentInput));
+_commentInput.addEventListener("keydown", (e) => {
+  if (_mentionState.open) {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      _mentionState.selected = Math.min(_mentionState.selected + 1, _mentionState.items.length - 1);
+      _renderMentionPopup(_commentInput);
+      return;
+    }
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      _mentionState.selected = Math.max(_mentionState.selected - 1, 0);
+      _renderMentionPopup(_commentInput);
+      return;
+    }
+    if (e.key === "Enter" || e.key === "Tab") {
+      e.preventDefault();
+      _pickMention(_mentionState.selected, _commentInput);
+      return;
+    }
+    if (e.key === "Escape") {
+      e.preventDefault();
+      _closeMentionPopup();
+      return;
+    }
+  }
+  // Plain Enter without popup → submit the comment
+  if (e.key === "Enter" && !_mentionState.open) {
+    e.preventDefault();
+    document.getElementById("t-postComment").click();
+  }
+});
+_commentInput.addEventListener("blur", () => setTimeout(_closeMentionPopup, 150));
 
 document.getElementById("t-postComment").onclick = async () => {
   if (!editingId) return;
