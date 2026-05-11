@@ -107,6 +107,13 @@
   </section>
 
   <section>
+    <h2>Tool registry
+      <button id="refreshTools">Refresh</button>
+    </h2>
+    <div id="toolsContainer" style="font-size:13px"></div>
+  </section>
+
+  <section>
     <h2>Agent type drafts
       <button id="refreshDrafts">Refresh</button>
     </h2>
@@ -286,7 +293,86 @@ async function loadDrafts() {
 }
 $("refreshDrafts").onclick = loadDrafts;
 
+async function loadTools() {
+  const [approved, drafts] = await Promise.all([
+    api("/api/tools"),
+    api("/api/admin/tools/drafts"),
+  ]);
+  const box = $("toolsContainer");
+  const renderRow = (t, isDraft) => {
+    const row = document.createElement("div");
+    row.style.cssText = "border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:8px;background:var(--panel2)";
+    const tamper = t._sha256_mismatch
+      ? `<span style="font-size:10px;background:rgba(255,113,113,0.15);color:var(--error);padding:1px 6px;border-radius:999px;margin-left:6px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">tampered</span>` : "";
+    const statusPill = isDraft
+      ? `<span style="font-size:10px;background:rgba(240,180,41,0.15);color:#f0b429;padding:1px 6px;border-radius:999px;margin-left:6px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">${escapeHtml(t.status || "draft")}</span>`
+      : `<span style="font-size:10px;background:rgba(76,175,120,0.15);color:#4caf78;padding:1px 6px;border-radius:999px;margin-left:6px;text-transform:uppercase;letter-spacing:0.5px;font-weight:600">approved</span>`;
+    const builtinPill = t.builtin
+      ? `<span class="pill" style="background:var(--panel);font-size:10px;color:var(--muted);padding:1px 6px;border-radius:999px;margin-left:6px">built-in</span>` : "";
+    const caps = t.capabilities || {};
+    const egress = (caps.network && caps.network.egress) || [];
+    const writes = (caps.filesystem && caps.filesystem.write) || [];
+    const envs   = caps.env_vars || [];
+    const capLine = [
+      egress.length ? `egress: ${egress.join(", ")}` : null,
+      writes.length ? `fs.write: ${writes.join(", ")}` : null,
+      envs.length   ? `env: ${envs.join(", ")}` : null,
+    ].filter(Boolean).join(" · ") || "no declared capabilities";
+    row.innerHTML = `
+      <div style="display:flex;align-items:flex-start;gap:10px">
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;flex-wrap:wrap">
+            <strong style="font-size:14px">${escapeHtml(t.name || t.slug)}</strong>
+            <code class="mono" style="background:var(--panel);padding:1px 6px;border-radius:4px;font-size:11px">${escapeHtml(t.slug)}</code>
+            ${statusPill}${builtinPill}${tamper}
+          </div>
+          ${t.description ? `<div style="color:var(--muted);font-size:12px;margin-bottom:6px;line-height:1.4">${escapeHtml(t.description)}</div>` : ""}
+          <div style="font-size:10px;color:var(--muted);font-family:ui-monospace,Menlo,Consolas,monospace">${escapeHtml(capLine)}</div>
+        </div>
+        ${isDraft ? `
+        <div style="display:flex;flex-direction:column;gap:6px;flex-shrink:0">
+          <button class="primary" data-approve-tool="${escapeHtml(t.slug)}">Approve</button>
+          <button class="danger" data-reject-tool="${escapeHtml(t.slug)}">Reject</button>
+        </div>` : ""}
+      </div>`;
+    return row;
+  };
+  box.innerHTML = "";
+  if (drafts && drafts.length) {
+    const hdr = document.createElement("div");
+    hdr.style.cssText = "font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin:0 0 6px";
+    hdr.textContent = `Awaiting review (${drafts.length})`;
+    box.appendChild(hdr);
+    drafts.forEach(t => box.appendChild(renderRow(t, true)));
+  }
+  if (approved && approved.length) {
+    const hdr = document.createElement("div");
+    hdr.style.cssText = "font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin:10px 0 6px";
+    hdr.textContent = `Active (${approved.length})`;
+    box.appendChild(hdr);
+    approved.forEach(t => box.appendChild(renderRow(t, false)));
+  }
+  if (!drafts.length && !approved.length) {
+    box.innerHTML = '<div style="color:var(--muted);padding:10px 0">No tools registered.</div>';
+  }
+  box.querySelectorAll("[data-approve-tool]").forEach(b => b.onclick = async () => {
+    try {
+      await api(`/api/admin/tools/${b.dataset.approveTool}/approve`, { method: "POST" });
+      toast("Approved"); loadTools();
+    } catch (e) { toast(e.message, "err"); }
+  });
+  box.querySelectorAll("[data-reject-tool]").forEach(b => b.onclick = async () => {
+    if (!confirm(`Reject and delete tool "${b.dataset.rejectTool}"?`)) return;
+    try {
+      await api(`/api/admin/tools/${b.dataset.rejectTool}`, { method: "DELETE" });
+      toast("Rejected"); loadTools();
+    } catch (e) { toast(e.message, "err"); }
+  });
+}
+$("refreshTools").onclick = loadTools;
+
 loadInterval();
+loadTools();
 loadDrafts();
 loadSso();
 loadSessions();

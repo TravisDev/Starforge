@@ -1,0 +1,25 @@
+version: 1
+tool:
+  slug: create_agent_type
+  name: Create Agent Type (draft)
+  description: "Draft a new agent type by writing config.yaml + system_prompt.md + guardrails.yaml into ./agents/<slug>/. Output is a draft — an admin must Activate before it appears in the Team Member dropdown."
+  builtin: true
+  status: approved
+  approved_at: "2026-05-11T00:00:00Z"
+  approved_by: starforge-core
+
+  capabilities:
+    network:
+      egress: ["starforge-internal"]
+    filesystem:
+      read: []
+      write: ["./agents/<slug>/"]      # constrained by API endpoint validation
+    env_vars: ["STARFORGE_MEMBER_ID", "STARFORGE_CALLBACK_URL", "STARFORGE_CALLBACK_TOKEN"]
+
+  inputs:
+    - name: spec
+      type: object
+      required: true
+      description: "Full agent spec: slug, name, description, model, provider, system_prompt, optional guardrails + inputs."
+
+  notes: "Primary tool for the agent-builder meta-agent. Other agents shouldn't call it. Drafts always require admin Activate before going live, so this tool by itself cannot bring an unreviewed agent into rotation."

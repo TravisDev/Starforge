@@ -1,0 +1,26 @@
+version: 1
+tool:
+  slug: set_task_status
+  name: Set Task Status
+  description: "Move the current task between Kanban columns (in_progress, under_review, done). Authored as the calling agent, audited in the task's update timestamp."
+  builtin: true
+  status: approved
+  approved_at: "2026-05-11T00:00:00Z"
+  approved_by: starforge-core
+
+  capabilities:
+    network:
+      egress: ["starforge-internal"]   # calls back to Starforge's task-actions endpoint
+    filesystem:
+      read: []
+      write: []
+    env_vars: ["STARFORGE_MEMBER_ID", "STARFORGE_CALLBACK_URL", "STARFORGE_CALLBACK_TOKEN"]
+
+  inputs:
+    - name: status
+      type: enum
+      values: [in_progress, under_review, done]
+      required: true
+
+  # In comment_reply mode the runtime refuses this tool — chat doesn't move tasks.
+  notes: "Blocked by runtime in comment_reply mode."
