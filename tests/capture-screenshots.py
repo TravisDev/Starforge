@@ -72,6 +72,20 @@ def main() -> None:
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
+
+        # Unauthenticated pass first — login page
+        anon = browser.new_context(
+            viewport={"width": 1440, "height": 900},
+            device_scale_factor=2,
+        )
+        anon_page = anon.new_page()
+        anon_page.goto(f"{BASE_URL}/login")
+        anon_page.wait_for_load_state("networkidle")
+        anon_page.wait_for_timeout(400)
+        anon_page.screenshot(path=str(OUT / "login.png"))
+        print(f"  -> screenshots/login.png")
+        anon.close()
+
         context = browser.new_context(
             viewport={"width": 1440, "height": 900},
             device_scale_factor=2,  # higher DPI for crisp readme images
@@ -131,11 +145,33 @@ def main() -> None:
             """)
             page.wait_for_selector("#memOverlay.open", timeout=3000)
             page.wait_for_timeout(600)
-            shoot(page, "team-member-modal")
+            shoot(page, "team-editor")
             page.keyboard.press("Escape")
             page.wait_for_timeout(300)
         except Exception as e:
-            print(f"  (skipped team-member-modal: {e})")
+            print(f"  (skipped team-editor: {e})")
+
+        # 3b. Task editor view — a task without a long thread, to show the form clearly
+        try:
+            page.evaluate("""
+                () => {
+                    const cards = document.querySelectorAll('.card');
+                    // Prefer a task whose title doesn't suggest a comment thread already exists
+                    let best = null;
+                    for (const c of cards) {
+                        const title = (c.querySelector('.title')?.textContent || '').toLowerCase();
+                        if (title.includes('wire up') || title.includes('try the api')) { best = c; break; }
+                    }
+                    (best || cards[0])?.click();
+                }
+            """)
+            page.wait_for_selector("#overlay.open", timeout=3000)
+            page.wait_for_timeout(500)
+            shoot(page, "task-editor")
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(300)
+        except Exception as e:
+            print(f"  (skipped task-editor: {e})")
 
         # 4. Projects management page
         page.goto(f"{BASE_URL}/projects")

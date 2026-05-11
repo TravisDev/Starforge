@@ -10,10 +10,12 @@ A slim, API-first Kanban + project + (planned) agent-management app for orchestr
 
 | | |
 |---|---|
-| ![Back-and-forth conversation between a user and the assigned AI agent in a task's comment thread](screenshots/task-with-comments.png) | ![Projects management page listing every project's name, slug, task count, and status](screenshots/projects-page.png) |
-| **Task with agent conversation** — assigned an AI member to a task and now chatting with them inline. The agent posted findings, you replied "are you sure?" without an `@`-mention, and the trigger picked them up implicitly. | **Projects page** — every project the team works in. Each carries its own runtime config + secrets. |
-| ![Admin Settings page showing SSO providers, AI agent runtime image-update interval, and active sessions](screenshots/settings-page.png) | |
-| **Admin Settings** — register OIDC SSO providers (Keycloak, Authentik, etc.), tune how often Starforge polls registries for newer agent images, and see + revoke every active session. | |
+| ![Login screen with email + password fields and the Sign in button](screenshots/login.png) | ![Task editor modal showing title, description, project, status, assignee, and comments](screenshots/task-editor.png) |
+| **Sign in** — local password (Argon2id) or any OIDC provider you've wired up from Settings. | **Task editor** — title, description, project, status, assignee dropdown, and inline comments. Saves only the fields you actually changed, so a stale modal can't trample agent updates. |
+| ![Back-and-forth conversation between a user and the assigned AI agent in a task's comment thread](screenshots/task-with-comments.png) | ![Team-member editor for an AI agent showing the resolved snapshot, runtime actions, and agent log](screenshots/team-editor.png) |
+| **Talking to an agent** — assigned task, agent investigated, posted findings. You replied without an `@`-mention; the trigger picked it up implicitly because the task is already assigned to them. | **Team-member editor** (AI agent view) — the resolved snapshot of the agent's prompt + guardrails, runtime actions (Stop / Restart / Update), and the live run history. |
+| ![Projects management page listing every project's name, slug, task count, and status](screenshots/projects-page.png) | ![Admin Settings page showing SSO providers, AI agent runtime image-update interval, and active sessions](screenshots/settings-page.png) |
+| **Projects page** — every project the team works in. Each carries its own runtime config + secrets. | **Admin Settings** — register OIDC SSO providers (Keycloak, Authentik, etc.), tune how often Starforge polls registries for newer agent images, and see + revoke every active session. |
 
 ---
 
