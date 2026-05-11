@@ -215,18 +215,19 @@
   .runtime-dot[data-status="error"]           { background: #ff7171; }
   @keyframes rt-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 
-  /* Yellow "Update" pill — appears next to AI members when a newer image
-     is available at the registry. Click → restart with pull. */
-  .update-btn {
+  /* Yellow "Update" pill — appears in the team row to the LEFT of the AI/Human
+     pill when a newer image is available at the registry. Click → restart with pull. */
+  .update-pill {
     background: #f0b429; color: #0b1020;
-    border: none; border-radius: 3px;
-    padding: 1px 6px; font-size: 9px; font-weight: 700;
-    cursor: pointer; margin-left: 6px; vertical-align: middle;
+    border: none; border-radius: 999px;
+    padding: 2px 8px; font-size: 9px; font-weight: 700;
+    cursor: pointer; vertical-align: middle;
     text-transform: uppercase; letter-spacing: 0.5px;
     font-family: inherit;
+    flex-shrink: 0;
   }
-  .update-btn:hover { background: #ffcc4b; }
-  .update-btn:disabled { opacity: 0.5; cursor: progress; }
+  .update-pill:hover { background: #ffcc4b; }
+  .update-pill:disabled { opacity: 0.5; cursor: progress; }
 
   /* Runtime action row inside the member modal */
   .rt-actions { display: flex; gap: 6px; flex-wrap: wrap; }
@@ -1284,33 +1285,41 @@ function renderTeam() {
     const runtimeDot = m.type === "ai_agent"
       ? `<span class="runtime-dot" data-status="${escapeHtml(m.runtime_status || "not_provisioned")}" title="runtime: ${escapeHtml(m.runtime_status || "not_provisioned")}"></span>`
       : "";
-    const updateBtn = m.update_available
-      ? `<button class="update-btn" data-update-mid="${m.id}" title="Newer image available. Click to update.">Update</button>`
+    const updatePill = m.update_available
+      ? `<button class="update-pill" data-update-mid="${m.id}" title="Newer image available. Click to update.">Update</button>`
       : "";
     row.innerHTML = `
       <div class="av" style="background:${m.color}">${(m.name[0] || "?").toUpperCase()}</div>
       <div class="info">
-        <div class="name">${escapeHtml(m.name)} ${runtimeDot}${updateBtn}</div>
+        <div class="name">${escapeHtml(m.name)} ${runtimeDot}</div>
         <div class="role">${escapeHtml(m.role || (m.type === "ai_agent" ? "AI Agent" : "Member"))}</div>
       </div>
       <div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px">
-        <span class="type-pill ${m.type}">${m.type === "ai_agent" ? "AI" : "Human"}</span>
+        <div style="display:flex;align-items:center;gap:4px">
+          ${updatePill}
+          <span class="type-pill ${m.type}">${m.type === "ai_agent" ? "AI" : "Human"}</span>
+        </div>
         ${typeTag}
       </div>
     `;
-    // Wire the inline Update button (don't open the modal when clicked)
+    // Update pill — restart container with a fresh image pull. stopPropagation
+    // so clicking it doesn't also open the member modal.
     const upBtn = row.querySelector("[data-update-mid]");
     if (upBtn) upBtn.onclick = async (e) => {
       e.stopPropagation();
-      upBtn.disabled = true; upBtn.textContent = "Updating…";
+      upBtn.disabled = true;
+      const prevText = upBtn.textContent;
+      upBtn.textContent = "Updating…";
       try {
         const r = await fetch(`/api/team-members/${upBtn.dataset.updateMid}/runtime/restart?pull=true`,
                               { method: "POST" });
         if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.status);
+        lastTeamSig = null;  // force a fresh render on next poll
         await loadTeam();
       } catch (err) {
         alert("update failed: " + err.message);
-        upBtn.disabled = false; upBtn.textContent = "Update";
+        upBtn.disabled = false;
+        upBtn.textContent = prevText;
       }
     };
     row.onclick = () => openMemberModal(m);
