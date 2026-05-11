@@ -4,6 +4,8 @@ A slim, API-first Kanban + project + (planned) agent-management app for orchestr
 
 > **Status:** v0.3 — local + OIDC SSO authentication, project organization, admin settings. Agent manager (Phase B/C) is designed and parked, not built. Not yet hardened for public-internet exposure (see [Security & Threat Model](#security--threat-model)).
 
+![Starforge Kanban board with team pane and four-status columns](screenshots/board.png)
+
 ---
 
 ## Quick Start
