@@ -470,11 +470,18 @@ async def _run_agent(
                     url = tool.get("url", "")
                     res = await _tool_http_get(url)
                 elif name == "set_task_status":
-                    res = await _tool_task_action(
-                        action_type="set_status", task_id=task_id,
-                        callback_url=callback_url, callback_token=callback_token,
-                        status=tool.get("status"),
-                    )
+                    if mode == "comment_reply":
+                        # Hard guard: chat mode never changes task status, even if
+                        # the LLM tries to. The user controls workflow state.
+                        res = ("set_task_status is NOT AVAILABLE in this chat mode. "
+                               "The task status will stay exactly where it is. "
+                               "Just call add_comment with your reply, then finish.")
+                    else:
+                        res = await _tool_task_action(
+                            action_type="set_status", task_id=task_id,
+                            callback_url=callback_url, callback_token=callback_token,
+                            status=tool.get("status"),
+                        )
                 elif name == "add_comment":
                     res = await _tool_task_action(
                         action_type="comment", task_id=task_id,
