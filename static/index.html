@@ -354,6 +354,21 @@
   .card .pill {
     background: rgba(255,255,255,0.05); padding: 2px 8px; border-radius: 999px;
   }
+  .card .approve-btn {
+    margin-left: auto;
+    background: var(--accent);
+    color: #0b1020;
+    border: none;
+    padding: 3px 10px;
+    border-radius: 4px;
+    font: inherit;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    cursor: pointer;
+  }
+  .card .approve-btn:hover { background: #8fbcff; }
 
   /* Modal */
   .overlay {
@@ -806,11 +821,29 @@ function cardEl(task) {
     meta.push(`<span class="pill">@${escapeHtml(task.assignee)}</span>`);
   }
   meta.push(`<span class="pill">#${task.id}</span>`);
+  if (task.status === "under_review") {
+    meta.push(`<button class="approve-btn" data-approve-id="${task.id}" title="Mark done">Approve</button>`);
+  }
   el.innerHTML = `
     <div class="title">${escapeHtml(task.title)}</div>
     ${task.description ? `<div class="desc">${escapeHtml(task.description)}</div>` : ""}
     <div class="meta">${meta.join("")}</div>
   `;
+  const approveEl = el.querySelector("[data-approve-id]");
+  if (approveEl) approveEl.onclick = async (e) => {
+    e.stopPropagation();   // don't open the modal
+    approveEl.disabled = true;
+    approveEl.textContent = "…";
+    try {
+      await api.update(task.id, { status: "done" });
+      lastTasksSig = null;  // force the next render to actually redraw
+      render();
+    } catch (err) {
+      alert("could not approve: " + err.message);
+      approveEl.disabled = false;
+      approveEl.textContent = "Approve";
+    }
+  };
   el.onclick = () => openModal(task);
   el.addEventListener("dragstart", (e) => {
     isDragging = true;
