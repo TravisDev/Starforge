@@ -517,14 +517,8 @@
 <div class="overlay" id="memOverlay">
   <div class="modal">
     <h3 id="memModalTitle">New team member</h3>
-    <!-- Name header — display mode (text + pencil) when editing; input mode when creating -->
-    <div id="m-nameHeaderRow" style="display:none;align-items:center;gap:8px;padding:4px 0 8px">
-      <span id="m-nameDisplay" style="font-size:16px;font-weight:600;flex:1"></span>
-      <button id="m-editNameBtn" type="button"
-              title="Edit name"
-              style="background:var(--panel2);color:var(--muted);border:1px solid var(--border);
-                     cursor:pointer;padding:4px 8px;border-radius:6px;font-size:12px">✎ Edit</button>
-    </div>
+    <label>Name</label>
+    <input id="m-name" placeholder="e.g. Travis Tubbs, or coding-agent-1" />
     <div id="m-typeRow">
       <label>Type</label>
       <div class="type-toggle">
@@ -541,10 +535,6 @@
         Defined under <code style="color:var(--accent)">./agents/</code> in the repo.
         Selecting one pre-fills name and description from <code>config.yaml</code>.
       </div>
-    </div>
-    <div id="m-nameInputRow">
-      <label>Name</label>
-      <input id="m-name" placeholder="e.g. Travis Tubbs, or coding-agent-1" />
     </div>
     <div class="row">
       <div>
@@ -1392,8 +1382,6 @@ function openMemberModal(member = null) {
   document.getElementById("m-agent-type").value = member?.agent_type || "";
   // Type is immutable after creation — hide the toggle when editing
   document.getElementById("m-typeRow").style.display = member ? "none" : "";
-  // Name: display-mode-with-pencil when editing, input-mode when creating
-  setNameMode(member ? "display" : "input", member?.name || "");
   memberColor = member?.color || COLORS[0];
   renderMemberColors();
   document.getElementById("m-active").checked = member ? !!member.is_active : true;
@@ -1662,27 +1650,6 @@ function closeMemberModal() {
   editingMemberId = null;
 }
 
-function setNameMode(mode, name) {
-  // mode: "display" (label + pencil, only meaningful when editing an existing member)
-  //       "input"   (text input, used on Create and after clicking the pencil)
-  const header = document.getElementById("m-nameHeaderRow");
-  const inputRow = document.getElementById("m-nameInputRow");
-  const input = document.getElementById("m-name");
-  input.value = name;
-  if (mode === "display") {
-    document.getElementById("m-nameDisplay").textContent = name || "—";
-    header.style.display = "flex";
-    inputRow.style.display = "none";
-  } else {
-    header.style.display = "none";
-    inputRow.style.display = "";
-    setTimeout(() => { input.focus(); input.select(); }, 0);
-  }
-}
-
-document.getElementById("m-editNameBtn").onclick = () => {
-  setNameMode("input", document.getElementById("m-name").value);
-};
 
 document.getElementById("memCancel").onclick = closeMemberModal;
 document.getElementById("memOverlay").onclick = (e) => {
