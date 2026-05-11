@@ -1408,10 +1408,23 @@ async function init() {
 
 wireDropZones();
 init();
-setInterval(() => {
-  loadProjects().then(render);
-  loadTeam();   // refresh runtime status dots + update-available pills
-}, 5000);
+
+// Polling loop — tight (2s) and bulletproof. Each call is independently
+// try/caught so a transient failure (e.g. flaky network blip) doesn't kill
+// the loop. Pauses while the tab is hidden (browser throttles anyway) and
+// fires an immediate refresh when the tab regains focus.
+async function tick() {
+  try { await loadProjects(); } catch (e) { console.warn("loadProjects", e); }
+  try { await render();        } catch (e) { console.warn("render", e); }
+  try { await loadTeam();      } catch (e) { console.warn("loadTeam", e); }
+  // If a task modal is open and active, refresh its comments so agent posts appear live.
+  if (editingId && document.getElementById("overlay").classList.contains("open")) {
+    try { await loadTaskComments(editingId); } catch (e) { console.warn("comments", e); }
+  }
+}
+setInterval(() => { if (!document.hidden) tick(); }, 2000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) tick(); });
+window.addEventListener("focus", tick);
 </script>
 </body>
 </html>
