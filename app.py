@@ -55,7 +55,7 @@ from auth import (
 ROOT = Path(__file__).parent
 STATIC_DIR = ROOT / "static"
 AGENTS_DIR = ROOT / "agents"
-TOOLS_DIR = ROOT / "tools"
+TOOLS_REGISTRY = AGENTS_DIR / "tools.yaml"
 
 VALID_STATUSES = {"todo", "in_progress", "under_review", "done"}
 
@@ -1582,133 +1582,29 @@ async def admin_activate_agent_type(slug: str, _: dict = Depends(current_admin))
 
 
 # ---------- Tool registry ----------
+#
+# Single source of truth: ./agents/tools.yaml. Adding a tool means submitting
+# a PR that edits this file — the PR review IS the security review. Runtime
+# just reads it; there's no admin-Approve UI because the merge gate is the
+# admin step. Keeps the trust surface small and auditable via git history.
 
-def _read_tool_manifest(d: Path) -> Optional[dict[str, Any]]:
-    m = d / "manifest.yaml"
-    if not m.exists():
-        return None
-    try:
-        data = yaml.safe_load(m.read_text(encoding="utf-8")) or {}
-    except yaml.YAMLError:
-        return None
-    tool = data.get("tool") or {}
-    if not tool.get("slug"):
-        return None
-    return tool
-
-
-def list_tools(include_drafts: bool = False) -> list[dict[str, Any]]:
-    """Walk ./tools/ and return one entry per tool whose manifest parses.
-    By default only returns tools with status=approved (the actual usable set)."""
-    if not TOOLS_DIR.exists():
+def list_tools() -> list[dict[str, Any]]:
+    """Read the registry. Returns [] if the file is missing or malformed —
+    surfacing a parse error in the UI is more useful than a silent failure."""
+    if not TOOLS_REGISTRY.exists():
         return []
-    out: list[dict[str, Any]] = []
-    for d in sorted(TOOLS_DIR.iterdir()):
-        if not d.is_dir() or d.name.startswith("."):
-            continue
-        tool = _read_tool_manifest(d)
-        if not tool:
-            continue
-        status = (tool.get("status") or "draft").lower()
-        if status != "approved" and not include_drafts:
-            continue
-        # Hash check for non-builtin tools when they have a code file. Mismatch
-        # means the tool was modified after approval — drop from the active set
-        # until re-reviewed.
-        tool["_sha256_match"] = True
-        if not tool.get("builtin"):
-            tool_py = d / "tool.py"
-            pinned = tool.get("code_sha256")
-            if tool_py.exists() and pinned:
-                actual = hashlib.sha256(tool_py.read_bytes()).hexdigest()
-                tool["_sha256_match"] = (actual == pinned)
-                if not tool["_sha256_match"] and status == "approved" and not include_drafts:
-                    log.warning(
-                        "tool %s: code_sha256 mismatch (expected %s, got %s) — excluded from active set",
-                        tool["slug"], pinned[:12], actual[:12],
-                    )
-                    continue
-        out.append(tool)
-    return out
+    try:
+        data = yaml.safe_load(TOOLS_REGISTRY.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as e:
+        log.error("tools.yaml parse failed: %s", e)
+        return []
+    tools = data.get("tools") or []
+    return [t for t in tools if isinstance(t, dict) and t.get("slug")]
 
 
 @app.get("/api/tools")
 async def api_tools(_: dict = Depends(current_user)):
-    """List active (approved + hash-verified) tools."""
-    return list_tools(include_drafts=False)
-
-
-@app.get("/api/admin/tools/drafts")
-async def admin_list_tool_drafts(_: dict = Depends(current_admin)):
-    """List tools that need admin review — drafts and approved-but-tampered-with."""
-    drafts: list[dict[str, Any]] = []
-    if not TOOLS_DIR.exists():
-        return drafts
-    for d in sorted(TOOLS_DIR.iterdir()):
-        if not d.is_dir() or d.name.startswith("."):
-            continue
-        tool = _read_tool_manifest(d)
-        if not tool:
-            continue
-        status = (tool.get("status") or "draft").lower()
-        if status == "approved":
-            # Surface tampered approved tools as needing re-review
-            if not tool.get("builtin"):
-                tool_py = d / "tool.py"
-                pinned = tool.get("code_sha256")
-                if tool_py.exists() and pinned:
-                    actual = hashlib.sha256(tool_py.read_bytes()).hexdigest()
-                    if actual != pinned:
-                        tool["_sha256_mismatch"] = True
-                        tool["status"] = "needs-review"
-                        drafts.append(tool)
-            continue
-        drafts.append(tool)
-    return drafts
-
-
-@app.post("/api/admin/tools/{slug}/approve")
-async def admin_approve_tool(slug: str, user: dict = Depends(current_admin)):
-    d = TOOLS_DIR / slug
-    m = d / "manifest.yaml"
-    if not m.exists():
-        raise HTTPException(404, "tool not found")
-    try:
-        data = yaml.safe_load(m.read_text(encoding="utf-8")) or {}
-    except yaml.YAMLError as e:
-        raise HTTPException(400, f"manifest parse failed: {e}")
-    tool = data.setdefault("tool", {})
-    tool["status"] = "approved"
-    tool["approved_at"] = now_iso()
-    tool["approved_by"] = user["email"]
-    # For non-builtin tools, pin the sha256 of tool.py — future drift invalidates approval
-    if not tool.get("builtin"):
-        tp = d / "tool.py"
-        if tp.exists():
-            tool["code_sha256"] = hashlib.sha256(tp.read_bytes()).hexdigest()
-    m.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
-    log.info("tool approved: %s (by %s)", slug, user["email"])
-    return {"ok": True, "slug": slug, "status": "approved"}
-
-
-@app.delete("/api/admin/tools/{slug}", status_code=204)
-async def admin_reject_tool(slug: str, _: dict = Depends(current_admin)):
-    """Reject + remove a tool entirely. Safe for drafts; refuses to nuke
-    approved tools (those should be removed via PR review instead)."""
-    d = TOOLS_DIR / slug
-    if not d.exists():
-        raise HTTPException(404, "tool not found")
-    tool = _read_tool_manifest(d) or {}
-    status = (tool.get("status") or "draft").lower()
-    if status == "approved":
-        raise HTTPException(
-            400,
-            "approved tools cannot be deleted via this endpoint — "
-            "remove via repo change so the deletion is reviewed",
-        )
-    import shutil as _shutil
-    _shutil.rmtree(d)
-    log.info("tool rejected: %s", slug)
+    return list_tools()
 
 
 @app.delete("/api/admin/agent-types/{slug}", status_code=204)

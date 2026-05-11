@@ -1,0 +1,94 @@
+# Tool registry for Starforge agents.
+#
+# This file is the canonical list of tools available to AI agents. Adding a
+# tool means submitting a PR that edits this file — the PR review IS the
+# security review. The runtime reads this file at startup and only loads
+# tools listed here. No separate admin-Approve UI exists; merge gate is
+# enough governance because every change to this file is auditable via git.
+#
+# When we eventually add externally-implemented tools (Phase D.2), their
+# code lives elsewhere (e.g. ./tools/<slug>/tool.py) but registration STILL
+# happens here so reviewers see the full picture in one diff.
+
+version: 1
+
+tools:
+  - slug: http_get
+    name: HTTP GET
+    description: >
+      Fetch a URL via HTTP/HTTPS and return status, headers, and a body
+      preview (up to 800 bytes). Read-only — no POST/PUT/DELETE.
+    builtin: true                      # implementation lives in nemoclaw/runner.py
+    capabilities:
+      network:
+        egress: ["any"]                # arbitrary URL fetch — used for connectivity checks
+      filesystem: { read: [], write: [] }
+      env_vars: []
+    inputs:
+      - { name: url, type: string, required: true,
+          description: "Fully-qualified URL to GET (http or https)." }
+
+  - slug: set_task_status
+    name: Set Task Status
+    description: >
+      Move the current task between Kanban columns (in_progress, under_review,
+      done). Audited via the task's updated_at + author tracking.
+    builtin: true
+    capabilities:
+      network:
+        egress: ["starforge-internal"]  # only Starforge's task-actions callback
+      filesystem: { read: [], write: [] }
+      env_vars: [STARFORGE_MEMBER_ID, STARFORGE_CALLBACK_URL, STARFORGE_CALLBACK_TOKEN]
+    inputs:
+      - { name: status, type: enum, required: true,
+          values: [in_progress, under_review, done] }
+    notes: "Blocked by the runtime in comment_reply mode — chat doesn't move tasks."
+
+  - slug: add_comment
+    name: Add Comment
+    description: >
+      Post a comment on the current task, authored as the calling agent.
+      Used for findings, status updates, and conversational replies.
+    builtin: true
+    capabilities:
+      network:
+        egress: ["starforge-internal"]
+      filesystem: { read: [], write: [] }
+      env_vars: [STARFORGE_MEMBER_ID, STARFORGE_CALLBACK_URL, STARFORGE_CALLBACK_TOKEN]
+    inputs:
+      - { name: body, type: string, required: true,
+          description: "Comment body. Markdown allowed, max 8000 chars." }
+
+  - slug: create_agent_type
+    name: Create Agent Type (draft)
+    description: >
+      Draft a new agent type by writing config.yaml + system_prompt.md +
+      guardrails.yaml into ./agents/<slug>/. Output is a draft — an admin
+      must Activate it before it appears in the Team Member dropdown.
+    builtin: true
+    capabilities:
+      network:
+        egress: ["starforge-internal"]
+      filesystem:
+        read: []
+        write: ["./agents/<slug>/"]     # writes are constrained to the new agent's directory
+      env_vars: [STARFORGE_MEMBER_ID, STARFORGE_CALLBACK_URL, STARFORGE_CALLBACK_TOKEN]
+    inputs:
+      - { name: spec, type: object, required: true,
+          description: "Full agent spec: slug, name, description, model, provider, system_prompt, optional guardrails + inputs." }
+    notes: >
+      Primary tool for the agent-builder meta-agent. Drafts always require
+      admin Activate before going live, so a malicious spec can't enter
+      rotation without human review.
+
+  - slug: finish
+    name: Finish
+    description: >
+      Terminate the current agent run. The runtime closes the tool loop
+      and returns the collected output via callback.
+    builtin: true
+    capabilities:
+      network: { egress: [] }
+      filesystem: { read: [], write: [] }
+      env_vars: []
+    inputs: []
