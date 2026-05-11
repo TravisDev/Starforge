@@ -261,22 +261,26 @@ def get_update_check_interval() -> int:
 
 # Will be populated below once the check functions are defined.
 _update_loop_task: Optional[asyncio.Task] = None
+_health_loop_task: Optional[asyncio.Task] = None
 
 
 @asynccontextmanager
 async def lifespan(_app):
-    """Start the background image-update poller. Disabled when
-    STARFORGE_DISABLE_BACKGROUND_TASKS is set (used by the test suite)."""
-    global _update_loop_task
+    """Start the background pollers (image updates + container health
+    reconciliation). Both are disabled when STARFORGE_DISABLE_BACKGROUND_TASKS
+    is set (the test suite drives the checks directly)."""
+    global _update_loop_task, _health_loop_task
     if not os.environ.get("STARFORGE_DISABLE_BACKGROUND_TASKS"):
         _update_loop_task = asyncio.create_task(_image_update_loop())
+        _health_loop_task = asyncio.create_task(_health_check_loop())
     yield
-    if _update_loop_task and not _update_loop_task.done():
-        _update_loop_task.cancel()
-        try:
-            await _update_loop_task
-        except asyncio.CancelledError:
-            pass
+    for t in (_update_loop_task, _health_loop_task):
+        if t and not t.done():
+            t.cancel()
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
 
 
 app = FastAPI(title="Starforge", version="0.3.0", lifespan=lifespan)
@@ -908,6 +912,14 @@ async def admin_set_update_interval(
 async def admin_trigger_image_check(_: dict = Depends(current_admin)):
     """Run an image-update check immediately across every running AI member."""
     n = await check_all_image_updates()
+    return {"ok": True, "checked": n}
+
+
+@app.post("/api/admin/check-runtime-health")
+async def admin_trigger_health_check(_: dict = Depends(current_admin)):
+    """Force-reconcile container status across every supposedly-running AI member.
+    Use after manually killing containers to flush stale state."""
+    n = await check_all_member_health()
     return {"ok": True, "checked": n}
 
 
@@ -1965,6 +1977,94 @@ async def post_agent_run_result(run_id: str, body: RunResult, request: Request):
             ),
         )
     return {"ok": True}
+
+
+HEALTH_CHECK_INTERVAL = 30  # seconds — fast-ish so killed containers surface within ~30s
+
+
+async def check_member_health(member_id: int) -> Optional[str]:
+    """Inspect the container and reconcile runtime_status if it drifted.
+
+    Catches the case where the container was killed externally (`docker rm -f`,
+    OOM, host reboot, etc.) — Starforge would otherwise keep showing the member
+    as running forever. Returns the resolved status, or None if nothing to do.
+    """
+    with db() as conn:
+        row = conn.execute("SELECT * FROM team_members WHERE id = ?", (member_id,)).fetchone()
+    if not row:
+        return None
+    member = _row_to_member(row)
+    if member["type"] != "ai_agent" or not member.get("runtime_container_id"):
+        return None
+    if member.get("runtime_status") not in ("running", "starting"):
+        return None  # nothing claimed to be alive — leave alone
+    project = get_project_row(member["project_id"])
+    if not project:
+        return None
+    try:
+        rt_cfg = json.loads(project.get("runtime_config") or "{}")
+    except json.JSONDecodeError:
+        return None
+    try:
+        rt = get_runtime_for_project(rt_cfg)
+    except HTTPException:
+        return None
+    if rt is None:
+        return None
+
+    inspection = await rt.inspect(member["runtime_container_id"])
+    if inspection is None:
+        # Container vanished entirely
+        _set_member_runtime_state(
+            member_id,
+            runtime_status="stopped",
+            runtime_error="container no longer exists (killed or removed externally)",
+        )
+        return "stopped"
+
+    docker_status = inspection.status
+    if docker_status == "running":
+        if member["runtime_status"] != "running":
+            _set_member_runtime_state(member_id, runtime_status="running", runtime_error=None)
+        return "running"
+    # Anything not "running" (exited, dead, paused, restarting, …) → reconcile
+    _set_member_runtime_state(
+        member_id,
+        runtime_status="stopped",
+        runtime_error=f"container is not running (docker status: {docker_status})",
+    )
+    return "stopped"
+
+
+async def check_all_member_health() -> int:
+    """Iterate every AI member that claims to be running/starting and reconcile."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT id FROM team_members "
+            "WHERE type = 'ai_agent' "
+            "AND runtime_status IN ('running','starting') "
+            "AND runtime_container_id IS NOT NULL"
+        ).fetchall()
+    n = 0
+    for r in rows:
+        try:
+            await check_member_health(r["id"])
+            n += 1
+        except Exception as e:  # noqa: BLE001
+            log.warning("health check failed for member %s: %s", r["id"], e)
+    return n
+
+
+async def _health_check_loop() -> None:
+    """Background reconciliation: detect externally-killed/exited containers
+    and flip their DB row to 'stopped' so the UI shows reality."""
+    log.info("health check loop started (interval=%ss)", HEALTH_CHECK_INTERVAL)
+    while True:
+        await asyncio.sleep(HEALTH_CHECK_INTERVAL)
+        try:
+            await check_all_member_health()
+        except Exception as e:  # noqa: BLE001
+            log.exception("health check loop iteration failed: %s", e)
 
 
 async def _image_update_loop() -> None:
