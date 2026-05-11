@@ -122,6 +122,66 @@
         <label class="toggle"><input type="checkbox" id="f-archived" /> Archived</label>
       </div>
     </div>
+
+    <div id="runtimeSection" style="display:none;border-top:1px solid var(--border);padding-top:14px;margin-top:6px">
+      <details>
+        <summary style="cursor:pointer;color:var(--accent);font-size:12px;text-transform:uppercase;letter-spacing:1px">
+          AI Agent Runtime (containers spawned per AI member)
+        </summary>
+        <div style="margin-top:12px;display:flex;flex-direction:column;gap:10px">
+          <div style="font-size:11px;color:var(--muted);line-height:1.5">
+            When an AI-agent team member is added to this project, Starforge will spawn a
+            <code style="color:var(--accent)">nemoclaw</code> container per member using this config.
+            The container stays running for the lifetime of the membership.
+            <strong>Note:</strong> the Docker adapter (B.2) isn't wired up yet — saving here stores
+            the config but no containers spawn yet.
+          </div>
+          <div class="form-grid">
+            <div>
+              <label>Runtime type</label>
+              <select id="rt-type">
+                <option value="">— Not configured —</option>
+                <option value="docker">Docker</option>
+                <option value="k8s" disabled>Kubernetes (soon)</option>
+              </select>
+            </div>
+            <div>
+              <label>Image pull policy</label>
+              <select id="rt-pull">
+                <option value="if_not_present">if_not_present</option>
+                <option value="always">always</option>
+                <option value="never">never</option>
+              </select>
+            </div>
+            <div class="full">
+              <label>Docker host</label>
+              <input id="rt-host" placeholder="unix:///var/run/docker.sock or tcp://docker.example.com:2376" />
+            </div>
+            <div class="full">
+              <label>Image</label>
+              <input id="rt-image" placeholder="starforge-nemoclaw:dev" />
+            </div>
+            <div>
+              <label>Network</label>
+              <input id="rt-network" placeholder="starforge-agents (optional)" />
+            </div>
+            <div>
+              <label>CPU limit</label>
+              <input id="rt-cpu" placeholder="1" />
+            </div>
+            <div>
+              <label>Memory limit</label>
+              <input id="rt-mem" placeholder="2Gi" />
+            </div>
+            <div class="full">
+              <label>Extra env (JSON object)</label>
+              <textarea id="rt-env" placeholder='{"LOG_LEVEL":"debug"}' style="font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;min-height:60px"></textarea>
+            </div>
+          </div>
+        </div>
+      </details>
+    </div>
+
     <div class="actions">
       <button class="danger" id="deleteBtn" style="display:none">Delete</button>
       <button id="cancelBtn">Cancel</button>
@@ -195,6 +255,8 @@ function openNew() {
   chosenColor = COLORS[0]; renderColors();
   $("archivedField").style.display = "none";
   $("deleteBtn").style.display = "none";
+  // Runtime config is only meaningful for existing projects — saving it requires a project id
+  $("runtimeSection").style.display = "none";
   $("ov").classList.add("open"); $("f-name").focus();
 }
 
@@ -209,6 +271,19 @@ async function openEdit(id) {
   chosenColor = p.color; renderColors();
   $("archivedField").style.display = p.slug === "default" ? "none" : "";
   $("deleteBtn").style.display = p.slug === "default" ? "none" : "";
+
+  // Runtime config
+  $("runtimeSection").style.display = "";
+  const rc = await api(`/api/projects/${id}/runtime-config`) || {};
+  $("rt-type").value = rc.type || "";
+  $("rt-pull").value = rc.image_pull_policy || "if_not_present";
+  $("rt-host").value = rc.docker_host || "";
+  $("rt-image").value = rc.image || "";
+  $("rt-network").value = rc.network || "";
+  $("rt-cpu").value = rc.cpu_limit || "";
+  $("rt-mem").value = rc.memory_limit || "";
+  $("rt-env").value = rc.extra_env ? JSON.stringify(rc.extra_env, null, 2) : "";
+
   $("ov").classList.add("open"); $("f-name").focus();
 }
 
@@ -232,6 +307,26 @@ $("saveBtn").onclick = async () => {
     if (editingId) {
       payload.is_archived = $("f-archived").checked;
       await api(`/api/projects/${editingId}`, { method:"PATCH", body: JSON.stringify(payload) });
+      // Save runtime config too (only when editing — needs an existing project id)
+      let envObj = {};
+      const envRaw = $("rt-env").value.trim();
+      if (envRaw) {
+        try { envObj = JSON.parse(envRaw); }
+        catch { toast("Extra env must be valid JSON object", "err"); return; }
+      }
+      const rtPayload = {
+        type: $("rt-type").value || null,
+        docker_host: $("rt-host").value.trim(),
+        image: $("rt-image").value.trim(),
+        image_pull_policy: $("rt-pull").value || "if_not_present",
+        network: $("rt-network").value.trim(),
+        cpu_limit: $("rt-cpu").value.trim() || "1",
+        memory_limit: $("rt-mem").value.trim() || "2Gi",
+        extra_env: envObj,
+      };
+      await api(`/api/projects/${editingId}/runtime-config`, {
+        method: "PUT", body: JSON.stringify(rtPayload),
+      });
     } else {
       await api("/api/projects", { method:"POST", body: JSON.stringify(payload) });
     }

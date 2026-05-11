@@ -63,6 +63,9 @@ def init_projects_schema() -> None:
                 updated_at TEXT NOT NULL
             )"""
         )
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(projects)").fetchall()}
+        if "runtime_config" not in cols:
+            conn.execute("ALTER TABLE projects ADD COLUMN runtime_config TEXT NOT NULL DEFAULT '{}'")
 
 
 def ensure_default_project() -> int:
@@ -141,6 +144,21 @@ def init_team_members_schema() -> None:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(team_members)").fetchall()}
         if "agent_type" not in cols:
             conn.execute("ALTER TABLE team_members ADD COLUMN agent_type TEXT")
+        # Per-member runtime container state — populated by the Docker adapter (Phase B.2)
+        if "runtime_status" not in cols:
+            conn.execute(
+                "ALTER TABLE team_members ADD COLUMN runtime_status TEXT NOT NULL DEFAULT 'not_provisioned'"
+            )
+        if "runtime_container_id" not in cols:
+            conn.execute("ALTER TABLE team_members ADD COLUMN runtime_container_id TEXT")
+        if "runtime_endpoint" not in cols:
+            conn.execute("ALTER TABLE team_members ADD COLUMN runtime_endpoint TEXT")
+        if "runtime_error" not in cols:
+            conn.execute("ALTER TABLE team_members ADD COLUMN runtime_error TEXT")
+        if "runtime_started_at" not in cols:
+            conn.execute("ALTER TABLE team_members ADD COLUMN runtime_started_at TEXT")
+        if "runtime_image_digest" not in cols:
+            conn.execute("ALTER TABLE team_members ADD COLUMN runtime_image_digest TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_team_project ON team_members(project_id)")
 
 
@@ -652,6 +670,10 @@ def _project_with_count(conn, row) -> dict[str, Any]:
     d["task_count"] = conn.execute(
         "SELECT COUNT(*) AS c FROM tasks WHERE project_id = ?", (d["id"],)
     ).fetchone()["c"]
+    try:
+        d["runtime_config"] = json.loads(d.get("runtime_config") or "{}")
+    except json.JSONDecodeError:
+        d["runtime_config"] = {}
     return d
 
 
@@ -735,6 +757,65 @@ async def update_project(pid: int, body: ProjectUpdate, user: dict = Depends(cur
         conn.execute(f"UPDATE projects SET {', '.join(fields)} WHERE id = ?", params)
         row = conn.execute("SELECT * FROM projects WHERE id = ?", (pid,)).fetchone()
         return _project_with_count(conn, row)
+
+
+VALID_RUNTIME_TYPES = {"docker", "k8s"}
+VALID_PULL_POLICIES = {"if_not_present", "always", "never"}
+
+
+class ProjectRuntimeConfig(BaseModel):
+    """Project-level configuration for the agent runtime (Phase B/C).
+
+    Currently only the storage and validation paths are implemented — actual
+    container spawn happens in Phase B.2.
+    """
+    type: Optional[str] = None  # "docker" | "k8s" | None (= not configured)
+    docker_host: str = Field(default="", max_length=500)
+    image: str = Field(default="", max_length=500)
+    image_pull_policy: str = "if_not_present"
+    network: str = Field(default="", max_length=200)
+    cpu_limit: str = Field(default="1", max_length=50)
+    memory_limit: str = Field(default="2Gi", max_length=50)
+    extra_env: dict[str, str] = Field(default_factory=dict)
+
+
+@app.get("/api/projects/{pid}/runtime-config")
+async def get_project_runtime_config(pid: int, _: dict = Depends(current_user)):
+    project = get_project_row(pid)
+    if not project:
+        raise HTTPException(404, "project not found")
+    try:
+        cfg = json.loads(project.get("runtime_config") or "{}")
+    except json.JSONDecodeError:
+        cfg = {}
+    return cfg
+
+
+@app.put("/api/projects/{pid}/runtime-config")
+async def set_project_runtime_config(
+    pid: int,
+    body: ProjectRuntimeConfig,
+    user: dict = Depends(current_user),
+):
+    project = get_project_row(pid)
+    if not project:
+        raise HTTPException(404, "project not found")
+    if not can_modify_project(user, project):
+        raise HTTPException(403, "only admin or project creator can edit runtime config")
+    if body.type and body.type not in VALID_RUNTIME_TYPES:
+        raise HTTPException(400, f"type must be one of {sorted(VALID_RUNTIME_TYPES)} or null")
+    if body.image_pull_policy not in VALID_PULL_POLICIES:
+        raise HTTPException(400, f"image_pull_policy must be one of {sorted(VALID_PULL_POLICIES)}")
+    if body.type == "k8s":
+        # Schema-supported but adapter not built yet (B.2 is docker-only first)
+        raise HTTPException(501, "k8s runtime adapter not yet implemented — use docker for now")
+    cfg_json = json.dumps(body.model_dump())
+    with db() as conn:
+        conn.execute(
+            "UPDATE projects SET runtime_config = ?, updated_at = ? WHERE id = ?",
+            (cfg_json, now_iso(), pid),
+        )
+    return body.model_dump()
 
 
 @app.delete("/api/projects/{pid}", status_code=204)
