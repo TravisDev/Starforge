@@ -563,9 +563,7 @@
       <div class="rt-actions" id="m-runtimeActions"></div>
     </div>
     <div id="m-runsRow" style="display:none">
-      <label>Runs
-        <button type="button" id="m-runBtn" style="margin-left:8px;background:var(--accent);color:#0b1020;border:none;padding:4px 10px;border-radius:6px;font:inherit;font-size:11px;font-weight:600;cursor:pointer;text-transform:uppercase;letter-spacing:0.5px">▶ Run</button>
-      </label>
+      <label>Agent log</label>
       <div class="runs-list" id="m-runsList"></div>
     </div>
     <div id="m-activeRow" style="display:none;font-size:12px;color:var(--muted)">
@@ -1398,52 +1396,15 @@ function openMemberModal(member = null) {
     loadMemberSnapshot(member.id);
     renderRuntimeActions(member);
     loadMemberRuns(member.id);
-    bindRunButton(member);
   }
   document.getElementById("memOverlay").classList.add("open");
   document.getElementById("m-name").focus();
 }
 
-// ---------- Agent runs ----------
+// ---------- Agent log ----------
+// Runs are fired by triggers (task assignment, status→todo, comment @mentions),
+// not by a manual button. This section just shows the audit trail.
 let _runsPollTimer = null;
-
-function bindRunButton(member) {
-  const btn = document.getElementById("m-runBtn");
-  btn.disabled = member.runtime_status !== "running";
-  btn.title = btn.disabled
-    ? "Start the container first to enable runs"
-    : "Invoke this agent with custom inputs";
-  btn.onclick = () => openRunPrompt(member);
-}
-
-function openRunPrompt(member) {
-  // Quick-and-dirty inputs form: a JSON textarea seeded from the agent's
-  // declared input schema. Auto-generated form per-field comes later.
-  const declared = (member.config?.agent_snapshot?.config?.agent?.inputs) || [];
-  const seed = {};
-  for (const inp of declared) seed[inp.name] = inp.default ?? "";
-  const raw = prompt(
-    "Inputs (JSON) for this agent run:\n\n" +
-    "Declared: " + (declared.map(d => d.name + (d.required ? "*" : "")).join(", ") || "(none)"),
-    JSON.stringify(seed, null, 2),
-  );
-  if (raw === null) return;
-  let inputs;
-  try { inputs = JSON.parse(raw); }
-  catch (e) { alert("Inputs must be valid JSON: " + e.message); return; }
-  triggerRun(member.id, inputs);
-}
-
-async function triggerRun(memberId, inputs) {
-  try {
-    const r = await fetch(`/api/team-members/${memberId}/runs`, {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ inputs }),
-    });
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.status);
-    await loadMemberRuns(memberId);
-  } catch (e) { alert("run failed to start: " + e.message); }
-}
 
 async function loadMemberRuns(memberId) {
   const list = document.getElementById("m-runsList");
