@@ -389,30 +389,54 @@ VALID_COLORS = {
 }
 
 
-def list_agent_types() -> list[dict[str, Any]]:
-    """Scan ./agents/ and return one entry per agent directory that has a valid config.yaml."""
+def _is_draft(agent_dir: Path) -> bool:
+    """A draft agent type carries a _status.yaml sentinel with status=draft.
+    Activation strips the sentinel."""
+    status_file = agent_dir / "_status.yaml"
+    if not status_file.exists():
+        return False
+    try:
+        data = yaml.safe_load(status_file.read_text(encoding="utf-8")) or {}
+        return (data.get("status") or "").lower() == "draft"
+    except yaml.YAMLError:
+        return False
+
+
+def _agent_summary(d: Path) -> Optional[dict[str, Any]]:
+    cfg = d / "config.yaml"
+    if not cfg.exists():
+        return None
+    try:
+        data = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError:
+        return None
+    agent = data.get("agent") or {}
+    if not agent.get("name"):
+        return None
+    return {
+        "slug": d.name,
+        "name": agent.get("name", d.name),
+        "description": agent.get("description", ""),
+        "model": agent.get("model", ""),
+        "provider": agent.get("provider", "anthropic"),
+    }
+
+
+def list_agent_types(include_drafts: bool = False) -> list[dict[str, Any]]:
+    """Scan ./agents/ and return one entry per agent directory.
+    By default skips drafts so the New Team Member dropdown only shows live ones."""
     if not AGENTS_DIR.exists():
         return []
     out: list[dict[str, Any]] = []
     for d in sorted(AGENTS_DIR.iterdir()):
         if not d.is_dir() or d.name.startswith("."):
             continue
-        cfg = d / "config.yaml"
-        if not cfg.exists():
+        if not include_drafts and _is_draft(d):
             continue
-        try:
-            data = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
-        except yaml.YAMLError:
-            continue
-        agent = data.get("agent") or {}
-        if not agent.get("name"):
-            continue
-        out.append({
-            "slug": d.name,
-            "name": agent.get("name", d.name),
-            "description": agent.get("description", ""),
-            "model": agent.get("model", ""),
-        })
+        summary = _agent_summary(d)
+        if summary:
+            summary["is_draft"] = _is_draft(d)
+            out.append(summary)
     return out
 
 
@@ -1398,8 +1422,177 @@ async def update_member(mid: int, body: TeamMemberUpdate, _: dict = Depends(curr
 
 @app.get("/api/agent-types")
 async def api_agent_types(_: dict = Depends(current_user)):
-    """List AI agent types defined under ./agents/ in the repo."""
+    """List live (non-draft) AI agent types defined under ./agents/."""
     return list_agent_types()
+
+
+# ---------- Agent-type drafting (called by the agent-builder meta-agent) ----------
+
+VALID_AGENT_PROVIDERS = {"anthropic", "openai", "ollama"}
+
+
+class AgentTypeCreate(BaseModel):
+    """Spec for a new agent type. The agent-builder produces one of these via
+    the create_agent_type tool; the endpoint validates + writes the three
+    files into ./agents/<slug>/ as a draft."""
+    slug: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,40}$")
+    name: str = Field(min_length=1, max_length=100)
+    description: str = Field(default="", max_length=500)
+    model: str = Field(min_length=1, max_length=100)
+    provider: str = "ollama"
+    provider_endpoint: str = Field(default="", max_length=500)
+    system_prompt: str = Field(min_length=10)
+    guardrails: Optional[dict[str, Any]] = None
+    inputs: Optional[list[dict[str, Any]]] = None
+
+
+def _bearer_token_from_request(request: Request) -> Optional[str]:
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        return None
+    return auth[len("Bearer "):]
+
+
+def _project_id_from_callback_token(token: str) -> Optional[int]:
+    """Resolve a bearer token to the project whose runtime_secrets contain it."""
+    with db() as conn:
+        rows = conn.execute("SELECT id FROM projects WHERE runtime_secrets_enc IS NOT NULL").fetchall()
+    for r in rows:
+        s = get_project_secrets(r["id"])
+        expected = s.get("callback_token")
+        if expected and secrets_lib.compare_digest(token, expected):
+            return r["id"]
+    return None
+
+
+@app.post("/api/agent-types", status_code=201)
+async def create_agent_type_draft(
+    body: AgentTypeCreate,
+    request: Request,
+    created_by_member_id: Optional[int] = None,
+):
+    """Write a new agent type into ./agents/<slug>/ as a draft. Authenticated
+    by a Bearer token matching any project's callback_token (so agent-builder
+    containers can call this without a user session)."""
+    token = _bearer_token_from_request(request)
+    if not token:
+        raise HTTPException(401, "missing bearer token")
+    project_id = _project_id_from_callback_token(token)
+    if project_id is None:
+        raise HTTPException(401, "invalid bearer token")
+    if body.provider not in VALID_AGENT_PROVIDERS:
+        raise HTTPException(400, f"provider must be one of {sorted(VALID_AGENT_PROVIDERS)}")
+
+    agent_dir = AGENTS_DIR / body.slug
+    if agent_dir.exists():
+        raise HTTPException(409, f"agent type {body.slug!r} already exists")
+
+    # Compose config.yaml
+    config_doc: dict[str, Any] = {
+        "version": 1,
+        "agent": {
+            "name": body.name,
+            "description": body.description,
+            "provider": body.provider,
+            "model": body.model,
+        },
+    }
+    if body.provider_endpoint:
+        config_doc["agent"]["provider_endpoint"] = body.provider_endpoint
+    if body.inputs:
+        config_doc["agent"]["inputs"] = body.inputs
+    # system_prompt + guardrails reference sibling files for clarity
+    config_doc["agent"]["system_prompt"] = {"source": "file", "path": "system_prompt.md"}
+    if body.guardrails:
+        config_doc["agent"]["guardrails"] = {"source": "file", "path": "guardrails.yaml"}
+
+    status_doc = {
+        "status": "draft",
+        "created_at": now_iso(),
+        "created_by_member_id": created_by_member_id,
+    }
+
+    # Atomic-ish: write to a temp dir then rename
+    tmp = AGENTS_DIR / f".{body.slug}.tmp"
+    if tmp.exists():
+        for f in tmp.iterdir():
+            f.unlink()
+        tmp.rmdir()
+    try:
+        tmp.mkdir(parents=True)
+        (tmp / "config.yaml").write_text(yaml.safe_dump(config_doc, sort_keys=False), encoding="utf-8")
+        (tmp / "system_prompt.md").write_text(body.system_prompt, encoding="utf-8")
+        if body.guardrails:
+            (tmp / "guardrails.yaml").write_text(
+                yaml.safe_dump(body.guardrails, sort_keys=False), encoding="utf-8"
+            )
+        (tmp / "_status.yaml").write_text(yaml.safe_dump(status_doc, sort_keys=False), encoding="utf-8")
+        tmp.rename(agent_dir)
+    except Exception:
+        # Roll back partial state
+        if tmp.exists():
+            for f in tmp.iterdir():
+                f.unlink()
+            tmp.rmdir()
+        raise
+
+    log.info("agent-type draft created: %s (by member %s)", body.slug, created_by_member_id)
+    return {"ok": True, "slug": body.slug, "status": "draft"}
+
+
+# ---------- Admin: agent-type drafts ----------
+
+@app.get("/api/admin/agent-types/drafts")
+async def admin_list_agent_type_drafts(_: dict = Depends(current_admin)):
+    drafts: list[dict[str, Any]] = []
+    if not AGENTS_DIR.exists():
+        return drafts
+    for d in sorted(AGENTS_DIR.iterdir()):
+        if not d.is_dir() or d.name.startswith("."):
+            continue
+        if not _is_draft(d):
+            continue
+        summary = _agent_summary(d) or {"slug": d.name, "name": d.name}
+        # Read sentinel for created_at / created_by
+        try:
+            sentinel = yaml.safe_load((d / "_status.yaml").read_text(encoding="utf-8")) or {}
+        except yaml.YAMLError:
+            sentinel = {}
+        summary["created_at"] = sentinel.get("created_at", "")
+        summary["created_by_member_id"] = sentinel.get("created_by_member_id")
+        # Snippets so admin can preview without separate fetches
+        sp = d / "system_prompt.md"
+        summary["system_prompt_preview"] = (sp.read_text(encoding="utf-8")[:600] if sp.exists() else "")
+        drafts.append(summary)
+    return drafts
+
+
+@app.post("/api/admin/agent-types/{slug}/activate")
+async def admin_activate_agent_type(slug: str, _: dict = Depends(current_admin)):
+    agent_dir = AGENTS_DIR / slug
+    sentinel = agent_dir / "_status.yaml"
+    if not agent_dir.exists() or not sentinel.exists():
+        raise HTTPException(404, "draft not found")
+    if not _is_draft(agent_dir):
+        raise HTTPException(400, "this agent type is not a draft")
+    sentinel.unlink()
+    log.info("agent-type activated: %s", slug)
+    return {"ok": True, "slug": slug, "status": "active"}
+
+
+@app.delete("/api/admin/agent-types/{slug}", status_code=204)
+async def admin_reject_agent_type(slug: str, _: dict = Depends(current_admin)):
+    agent_dir = AGENTS_DIR / slug
+    if not agent_dir.exists():
+        raise HTTPException(404, "agent type not found")
+    if not _is_draft(agent_dir):
+        # Refuse to delete a live agent through this endpoint — too easy to
+        # nuke a working agent by accident
+        raise HTTPException(400, "only drafts can be deleted; activate or leave alone")
+    for f in agent_dir.iterdir():
+        f.unlink()
+    agent_dir.rmdir()
+    log.info("agent-type draft rejected: %s", slug)
 
 
 @app.get("/api/team-members/{mid}/agent-snapshot")

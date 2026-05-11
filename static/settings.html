@@ -107,6 +107,13 @@
   </section>
 
   <section>
+    <h2>Agent type drafts
+      <button id="refreshDrafts">Refresh</button>
+    </h2>
+    <div id="draftsContainer" style="font-size:13px"></div>
+  </section>
+
+  <section>
     <h2>Active sessions
       <button id="refreshSessions">Refresh</button>
     </h2>
@@ -230,7 +237,57 @@ $("checkNowBtn").onclick = async () => {
   } catch (e) { toast(e.message, "err"); }
 };
 
+async function loadDrafts() {
+  const list = await api("/api/admin/agent-types/drafts") || [];
+  const box = $("draftsContainer");
+  if (!list.length) {
+    box.innerHTML = '<div style="color:var(--muted);padding:10px 0">No pending drafts. When an agent-builder run produces a new agent type, it lands here for review before it appears in the New Team Member dropdown.</div>';
+    return;
+  }
+  box.innerHTML = "";
+  list.forEach(d => {
+    const row = document.createElement("div");
+    row.style.cssText = "border:1px solid var(--border);border-radius:6px;padding:12px;margin-bottom:8px;background:var(--panel2)";
+    row.innerHTML = `
+      <div style="display:flex;align-items:flex-start;gap:10px">
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+            <strong style="font-size:14px">${escapeHtml(d.name || d.slug)}</strong>
+            <code class="mono" style="background:var(--panel);padding:1px 6px;border-radius:4px;font-size:11px">${escapeHtml(d.slug)}</code>
+            <span style="font-size:10px;color:var(--muted)">${escapeHtml(d.model || "")} · ${escapeHtml(d.provider || "")}</span>
+          </div>
+          ${d.description ? `<div style="color:var(--muted);font-size:12px;margin-bottom:6px">${escapeHtml(d.description)}</div>` : ""}
+          <details>
+            <summary style="cursor:pointer;color:var(--accent);font-size:11px">system_prompt preview</summary>
+            <pre style="background:var(--panel);padding:8px;border-radius:4px;font-size:11px;margin-top:4px;white-space:pre-wrap;word-break:break-word;max-height:200px;overflow:auto">${escapeHtml(d.system_prompt_preview || "")}</pre>
+          </details>
+          <div style="font-size:10px;color:var(--muted);margin-top:6px">created ${escapeHtml(d.created_at || "")}</div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px;flex-shrink:0">
+          <button class="primary" data-activate="${escapeHtml(d.slug)}">Activate</button>
+          <button class="danger" data-reject="${escapeHtml(d.slug)}">Reject</button>
+        </div>
+      </div>`;
+    box.appendChild(row);
+  });
+  box.querySelectorAll("[data-activate]").forEach(b => b.onclick = async () => {
+    try {
+      await api(`/api/admin/agent-types/${b.dataset.activate}/activate`, { method: "POST" });
+      toast("Activated"); loadDrafts();
+    } catch (e) { toast(e.message, "err"); }
+  });
+  box.querySelectorAll("[data-reject]").forEach(b => b.onclick = async () => {
+    if (!confirm(`Reject and delete draft "${b.dataset.reject}"?`)) return;
+    try {
+      await api(`/api/admin/agent-types/${b.dataset.reject}`, { method: "DELETE" });
+      toast("Rejected"); loadDrafts();
+    } catch (e) { toast(e.message, "err"); }
+  });
+}
+$("refreshDrafts").onclick = loadDrafts;
+
 loadInterval();
+loadDrafts();
 loadSso();
 loadSessions();
 </script>

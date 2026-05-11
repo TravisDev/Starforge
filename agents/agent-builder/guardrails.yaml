@@ -1,0 +1,19 @@
+# Guardrails for the agent-builder meta-agent.
+# Minimal — the main risk surface (creating live agents that can run untrusted
+# prompts) is mitigated by the draft-and-review flow rather than by rails.
+
+input_rails:
+  - injection_check        # don't let a malicious task description hijack the build
+
+output_rails:
+  - no_secrets_leaked
+
+action_rails:
+  - on: "create_agent_type"
+    require: none           # already gated by admin activation step
+
+topical:
+  allowed:
+    - agent_design
+    - prompt_engineering
+    - software_engineering

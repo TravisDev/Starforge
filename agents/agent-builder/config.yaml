@@ -1,0 +1,18 @@
+version: 1
+
+agent:
+  name: agent-builder
+  description: "Reads a task description and drafts a new agent type. Admin must activate before the new type appears in the team-member dropdown."
+  provider: ollama
+  provider_endpoint: http://host.docker.internal:11434/v1
+  model: llama3.1:8b
+
+  system_prompt:
+    source: file
+    path: system_prompt.md
+
+  inputs:
+    - name: requirements
+      type: string
+      required: false
+      description: "Free-form requirements describing the agent to build. Usually comes from the task description."

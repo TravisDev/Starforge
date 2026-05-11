@@ -250,6 +250,7 @@ Available tools:
 {"tool": "http_get", "url": "..."}                          — fetch a URL
 {"tool": "set_task_status", "status": "in_progress"}        — also: "under_review", "done"
 {"tool": "add_comment", "body": "..."}                      — post a comment with your findings
+{"tool": "create_agent_type", "spec": {...}}                — (meta-agents only) draft a new agent type
 {"tool": "finish"}                                          — end the run
 
 REQUIRED WORKFLOW:
@@ -329,6 +330,33 @@ async def _tool_http_get(url: str) -> str:
         return f"HTTP timeout (>{TOOL_HTTP_TIMEOUT}s) fetching {url}"
     except Exception as e:  # noqa: BLE001
         return f"HTTP error fetching {url}: {e}"
+
+
+async def _tool_create_agent_type(
+    *, spec: dict[str, Any], callback_url: str, callback_token: str,
+) -> str:
+    """Forward a spec from the agent-builder to Starforge's /api/agent-types.
+    Creates a draft that an admin must activate."""
+    if not callback_url or not STARFORGE_MEMBER_ID:
+        return "error: cannot draft agent type — missing callback_url or member id"
+    if not isinstance(spec, dict):
+        return f"error: spec must be an object, got {type(spec).__name__}"
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.post(
+                f"{callback_url.rstrip('/')}/api/agent-types"
+                f"?created_by_member_id={STARFORGE_MEMBER_ID}",
+                json=spec,
+                headers={"Authorization": f"Bearer {callback_token}"},
+            )
+        if r.status_code >= 400:
+            return f"create_agent_type error: HTTP {r.status_code} {r.text[:300]}"
+        return (
+            f"ok: agent type '{spec.get('slug', '?')}' drafted. "
+            "An admin must activate it before it appears in the team-member dropdown."
+        )
+    except Exception as e:  # noqa: BLE001
+        return f"create_agent_type error: {e}"
 
 
 async def _tool_task_action(
@@ -518,6 +546,12 @@ async def _run_agent(
                         action_type="comment", task_id=task_id,
                         callback_url=callback_url, callback_token=callback_token,
                         body=tool.get("body"),
+                    )
+                elif name == "create_agent_type":
+                    res = await _tool_create_agent_type(
+                        spec=tool.get("spec") or {},
+                        callback_url=callback_url,
+                        callback_token=callback_token,
                     )
                 else:
                     res = f"unknown tool: {name!r}"
